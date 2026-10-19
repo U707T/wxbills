@@ -45,15 +45,31 @@ jobs:
       - name: Get dependencies
         run: flutter pub get
       # 固定签名：keystore 与口令来自仓库 secrets，保证每次构建签名一致
-      # （升级安装不必先卸载）。secret 缺失时自动退回 debug 签名。
-      - name: Decode and save keystore
-        run: echo "${{ secrets.KEYSTORE }}" | base64 --decode > android/app/keystore.jks
-      - name: Save key.properties
+      # （升级安装不必先卸载）。
+      #
+      # secrets 没配置时必须**不生成** key.properties —— 否则 build.gradle.kts 会
+      # 认为「有发布签名」而去读一个空 keystore，报
+      # `KeytoolException: Failed to read key ... Tag number over 30 is not supported`。
+      # （secrets 不能在 if: 里直接引用，所以用 env + shell 判断。）
+      - name: Decode keystore (skip if secrets absent)
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         run: |
-          echo "storePassword=${{ secrets.STORE_PASSWORD }}" >> android/key.properties
-          echo "keyPassword=${{ secrets.KEY_PASSWORD }}" >> android/key.properties
-          echo "keyAlias=${{ secrets.KEY_ALIAS }}" >> android/key.properties
-          echo "storeFile=keystore.jks" >> android/key.properties
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 --decode > android/app/keystore.jks
+            {
+              echo "storePassword=$STORE_PASSWORD"
+              echo "keyPassword=$KEY_PASSWORD"
+              echo "keyAlias=$KEY_ALIAS"
+              echo "storeFile=keystore.jks"
+            } > android/key.properties
+            echo "已使用仓库 secrets 配置发布签名"
+          else
+            echo "::notice::未配置签名 secrets，本次使用 debug 签名构建"
+          fi
       - name: Build debug APK (arm64)
         run: flutter build apk --debug --target-platform=android-arm64
       - name: Build release APKs (split per ABI)
