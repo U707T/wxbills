@@ -161,7 +161,7 @@ void main() {
 
     final first = await SyncEngine(a).testConnection();
     expect(first, contains('连接成功'), reason: first);
-    expect(first, contains('路径可用'), reason: first);
+    expect(first, contains('可读可写'), reason: first);
     expect(first, contains('/dav/brand-new/'), reason: '要把最终路径回显出来：$first');
     expect(first, contains('首次同步'), reason: first);
 
@@ -191,6 +191,52 @@ void main() {
     final raw = server.getFile('/dav/wxbills/bills.json')!;
     final json = jsonDecode(utf8.decode(raw)) as Map<String, dynamic>;
     expect((json['bills'] as List).length, 1);
+    await dirsA.root.delete(recursive: true);
+  });
+
+  test('坚果云式只读根：地址填成 /dav 根时，报错要能照着改', () async {
+    server.refusePutAtRoot = true;
+    final (dirsA, a) = await newDevice('a');
+    a.setSync(cfgFor(server, sub: '')); // → http://…/dav/（根）
+    a.put(makeBill(id: 'x', updatedAt: 1000));
+    await a.save();
+
+    final r = await SyncEngine(a).run();
+    expect(r.ok, isFalse);
+    expect(r.message, contains('只能读'),
+        reason: '要说明是根目录不可写，而不是甩一段服务端 XML：${r.message}');
+    expect(r.message, contains('wxbills'), reason: '要给出可照做的子目录地址：${r.message}');
+
+    await dirsA.root.delete(recursive: true);
+  });
+
+  test('同一个「只读根」服务器：地址带上子目录就能同步成功', () async {
+    server.refusePutAtRoot = true;
+    final (dirsA, a) = await newDevice('a');
+    a.setSync(cfgFor(server)); // → /dav/wxbills
+    a.put(makeBill(id: 'x', updatedAt: 1000));
+    await a.save();
+
+    final r = await SyncEngine(a).run();
+    expect(r.ok, isTrue, reason: r.message);
+    expect(server.getFile('/dav/wxbills/bills.json'), isNotNull);
+
+    await dirsA.root.delete(recursive: true);
+  });
+
+  test('测试连接会真的验证「能不能写」，不只是能不能读', () async {
+    server.refusePutAtRoot = true;
+    final (dirsA, a) = await newDevice('a');
+
+    a.setSync(cfgFor(server, sub: ''));
+    final rootMsg = await SyncEngine(a).testConnection();
+    expect(rootMsg, contains('只能读'),
+        reason: '只读根必须在测试连接这一步就暴露，而不是等同步失败：$rootMsg');
+
+    a.setSync(cfgFor(server));
+    final okMsg = await SyncEngine(a).testConnection();
+    expect(okMsg, contains('可读可写'), reason: okMsg);
+
     await dirsA.root.delete(recursive: true);
   });
 }

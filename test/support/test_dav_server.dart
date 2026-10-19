@@ -41,6 +41,10 @@ class TestDavServer {
   /// 客户端如果原样透传弱 ETag，就会永远冲突。
   bool strictIfMatch = false;
 
+  /// 模拟坚果云：WebDAV **根集合只能读**，PUT 到根下的文件回
+  /// `404 ObjectNotFound`（这就是真机上「测试连接通过、同步却 404」的原因）。
+  bool refusePutAtRoot = false;
+
   /// 置为非 0 时，接下来 N 次 PUT 会先被「别的设备」抢先写一次，
   /// 用来验证客户端会重新下载 → 重新合并 → 再写。
   int forceConflictOnPut = 0;
@@ -212,6 +216,25 @@ class TestDavServer {
   Future<void> _put(HttpRequest request, String path) async {
     putCounts[path] = (putCounts[path] ?? 0) + 1;
     final body = await _readAll(request);
+
+    if (refusePutAtRoot) {
+      final parent = path.contains('/')
+          ? path.substring(0, path.lastIndexOf('/') + 1)
+          : '/';
+      if (parent == '$root/') {
+        request.response.statusCode = 404;
+        request.response.headers.contentType =
+            ContentType('application', 'xml', charset: 'utf-8');
+        request.response.write(
+            '<?xml version="1.0" encoding="UTF-8" standalone="no"?>'
+            '<d:error xmlns:d="DAV:" xmlns:s="http://ns.jianguoyun.com">'
+            '<s:exception>ObjectNotFound</s:exception>'
+            '<s:message>The resource of this location does not exist.</s:message>'
+            '</d:error>');
+        await request.response.close();
+        return;
+      }
+    }
 
     // 模拟「另一台设备刚好先写了」：本次请求必然拿到 412
     if (forceConflictOnPut > 0) {

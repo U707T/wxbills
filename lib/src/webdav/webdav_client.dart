@@ -165,7 +165,15 @@ class WebDavClient {
     final strong = strongEtag(ifMatch);
     if (strong.isNotEmpty) headers[HttpHeaders.ifMatchHeader] = strong;
     if (createOnly) headers[HttpHeaders.ifNoneMatchHeader] = '*';
-    final r = await _send('PUT', url, headers: headers, body: bytes);
+    var r = await _send('PUT', url, headers: headers, body: bytes);
+    // 少数服务端（例如坚果云）见到 `If-None-Match: *` 不是回 412，而是直接
+    // 404 ObjectNotFound。这种情况下把它当「不支持条件创建」处理：去掉条件头再发一次。
+    // 安全性没问题——调用方是「刚 GET 过、确认文件不存在」才用 createOnly 的。
+    if (createOnly && (r.status == 404 || r.status == 400 || r.status == 501)) {
+      await _drain(r.response);
+      headers.remove(HttpHeaders.ifNoneMatchHeader);
+      r = await _send('PUT', url, headers: headers, body: bytes);
+    }
     if (r.status == 412) {
       await _drain(r.response);
       throw PreconditionFailedException();
@@ -175,6 +183,14 @@ class WebDavClient {
       throw WebDavException('上传失败 HTTP ${r.status}${_suffix(text)}', null, r.status);
     }
     return r.headers.value(HttpHeaders.etagHeader) ?? '';
+  }
+
+  Future<void> delete(String url) async {
+    final r = await _send('DELETE', url);
+    final text = await _readText(r.response, limit: 512);
+    if (!_isSuccess(r.status) && r.status != 404) {
+      throw WebDavException('删除失败 HTTP ${r.status}${_suffix(text)}', null, r.status);
+    }
   }
 
   // ---------------------------------------------------------------- URL 工具

@@ -179,12 +179,19 @@ class SyncEngine {
         var pushed = 0;
         if (needWrite) {
           try {
-            await client.put(
-              snapshotUrl,
-              payload,
-              ifMatch: remote.etag,
-              createOnly: remote.bytes == null,
-            );
+            try {
+              await client.put(
+                snapshotUrl,
+                payload,
+                ifMatch: remote.etag,
+                createOnly: remote.bytes == null,
+              );
+            } on PreconditionFailedException {
+              rethrow;
+            } on WebDavException catch (e) {
+              // 根目录不可写这类问题（坚果云），把具体怎么改直接写进结果
+              throw WebDavException(_uploadHint(e, client.root), e, e.status);
+            }
             pushed = toPush;
           } on PreconditionFailedException {
             // 别人刚写过：重新下载 → 重新合并（最多 3 轮）
@@ -249,12 +256,27 @@ class SyncEngine {
         await client.ensureDir(dirUrl);
         entries = await client.list(dirUrl);
       }
+      // 2) 写权限：写一个探针文件再删掉。
+      //    坚果云的 WebDAV 根目录能读不能写；不测这一步的话，用户会先看到
+      //    「路径可用」，然后同步时才炸在 404 上。
+      final probeUrl = '${client.root}/.wxbills-write-test';
+      try {
+        await client.put(probeUrl, utf8.encode('ok'), contentType: 'text/plain');
+      } on WebDavException catch (e) {
+        return _friendlyError(e, client.root, writing: true);
+      }
+      try {
+        await client.delete(probeUrl);
+      } on WebDavException {
+        // 探针删不掉不影响结论：下次同步会用同名文件覆盖它
+      }
+
       final files = entries.where((e) => !e.isDirectory).toList();
       final hasSnapshot = files.any((e) => e.name == snapshotName);
       final where = '路径：${client.root}/';
       return hasSnapshot
-          ? '连接成功，路径可用。$where（已有远端快照，共 ${files.length} 个文件）'
-          : '连接成功，路径可用。$where（远端为空，首次同步会上传本机数据）';
+          ? '连接成功，路径可读可写。$where（已有远端快照，共 ${files.length} 个文件）'
+          : '连接成功，路径可读可写。$where（远端为空，首次同步会上传本机数据）';
     } on WebDavException catch (e) {
       return _friendlyError(e, client.root);
     } finally {
@@ -262,8 +284,24 @@ class SyncEngine {
     }
   }
 
+  /// 上传 404 时给出能照做的建议。
+  ///
+  /// 坚果云的 WebDAV 根目录（`https://dav.jianguoyun.com/dav/`）**只读**：
+  /// PROPFIND 正常、PUT 却回 404 ObjectNotFound。文件必须写在子目录里。
+  static String _uploadHint(WebDavException e, String root) {
+    if (e.status == 404) {
+      final base = root.replaceAll(RegExp(r'/+$'), '');
+      return '上传失败：服务端回答这个位置不存在（HTTP 404 ObjectNotFound）。'
+          '坚果云的 WebDAV 根目录只能读、不能直接写文件——把服务器地址改成一个子目录，'
+          '例如 $base/wxbills，再点「测试连接」。';
+    }
+    return e.message;
+  }
+
   /// 把状态码翻译成用户能照着做的提示（坚果云是最常见的配置场景）。
-  static String _friendlyError(WebDavException e, String root) {
+  static String _friendlyError(WebDavException e, String root,
+      {bool writing = false}) {
+    if (writing) return _uploadHint(e, root);
     switch (e.status) {
       case 401:
         return '连接失败：账号或密码不对。坚果云要在「账户信息 → 安全选项 → 添加应用密码」'

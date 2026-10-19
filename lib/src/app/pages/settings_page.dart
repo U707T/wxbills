@@ -42,11 +42,13 @@ class _SettingsPageState extends State<SettingsPage> {
     _insecure = cfg.allowInsecureTls;
     _auto = cfg.autoSync;
     c.addListener(_onChanged);
+    _url.addListener(_onUrlChanged);
   }
 
   @override
   void dispose() {
     c.removeListener(_onChanged);
+    _url.removeListener(_onUrlChanged);
     _url.dispose();
     _user.dispose();
     _pass.dispose();
@@ -54,6 +56,11 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   void _onChanged() {
+    if (mounted) setState(() {});
+  }
+
+  /// 地址栏内容变化时只为了刷新「用默认地址」按钮的显隐。
+  void _onUrlChanged() {
     if (mounted) setState(() {});
   }
 
@@ -155,9 +162,16 @@ class _SettingsPageState extends State<SettingsPage> {
             keyboardType: TextInputType.url,
             autocorrect: false,
             style: const TextStyle(fontSize: 13.5),
-            decoration: const InputDecoration(
+            decoration: InputDecoration(
               labelText: '服务器地址',
-              hintText: 'https://dav.jianguoyun.com/dav/wxbills',
+              hintText: kDefaultDavUrl,
+              // 地址填成网盘根目录时（坚果云根目录只读），一键回到默认子目录
+              suffixIcon: _url.text.trim() == kDefaultDavUrl
+                  ? null
+                  : TextButton(
+                      onPressed: () => setState(() => _url.text = kDefaultDavUrl),
+                      child: const Text('用默认', style: TextStyle(fontSize: 12)),
+                    ),
             ),
           ),
           const SizedBox(height: 10),
