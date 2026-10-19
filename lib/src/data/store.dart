@@ -102,7 +102,59 @@ class SyncConfig {
       );
 }
 
-/// 全部本地数据：收款单 + 目录 + 同步配置。
+/// 界面偏好：只跟「怎么显示」有关，不参与同步。
+///
+/// 目前只有两件事：
+///  * [seenTips]：哪些「一次性的说明弹窗」已经看过了。这些说明第一次看有用，
+///    第二次就是噪音（例如「刷新日期会把入库时间改成现在」那段长文）。
+///  * [autoScanOnBoot]：冷启动是否自动扫一遍相册。默认 **false** —— 相册动辄
+///    几百上千张，每次打开都比对一遍既费电又卡首屏，结果通常和上次一样；
+///    需要刷新时点一下「扫描识别」就行。
+class UiPrefs {
+  const UiPrefs({
+    this.seenTips = const <String>{},
+    this.autoScanOnBoot = false,
+  });
+
+  final Set<String> seenTips;
+  final bool autoScanOnBoot;
+
+  bool hasSeen(String key) => key.isNotEmpty && seenTips.contains(key);
+
+  UiPrefs markSeen(String key) {
+    if (key.isEmpty || seenTips.contains(key)) return this;
+    return UiPrefs(
+      seenTips: {...seenTips, key},
+      autoScanOnBoot: autoScanOnBoot,
+    );
+  }
+
+  UiPrefs copyWith({bool? autoScanOnBoot}) => UiPrefs(
+        seenTips: seenTips,
+        autoScanOnBoot: autoScanOnBoot ?? this.autoScanOnBoot,
+      );
+
+  /// 清空「已看过」记录：设置页的「重新显示所有说明」用。
+  UiPrefs clearTips() =>
+      UiPrefs(seenTips: const <String>{}, autoScanOnBoot: autoScanOnBoot);
+
+  Map<String, Object?> toJson() => {
+        'tips': seenTips.toList(),
+        'autoScan': autoScanOnBoot,
+      };
+
+  static UiPrefs fromJson(Map<String, Object?> j) {
+    final raw = j['tips'];
+    final tips = <String>{
+      if (raw is List)
+        for (final t in raw)
+          if (t is String && t.isNotEmpty) t,
+    };
+    return UiPrefs(seenTips: tips, autoScanOnBoot: j['autoScan'] == true);
+  }
+}
+
+/// 全部本地数据：收款单 + 目录 + 同步配置 + 界面偏好。
 ///
 /// 所有方法都在内存里操作，调用 [save] 才落盘（原子写；并发调用会排队串行执行）。
 /// 注意：解码与模板匹配目前**仍在主 isolate 上跑**（扫几百张会明显掉帧），
@@ -115,6 +167,7 @@ class BillStore {
   final Map<String, Bill> _bills = {};
   final List<SourceFolder> _folders = [];
   SyncConfig _sync = const SyncConfig();
+  UiPrefs _prefs = const UiPrefs();
 
   bool _loaded = false;
 
@@ -124,7 +177,19 @@ class BillStore {
   bool get loaded => _loaded;
   String get loadWarning => _loadWarning;
 
+  /// 数据版本号：任何会改变「列表应该显示什么」的操作都会 +1。
+  /// 界面用它判断缓存是否还有效，省掉「每个改动点手动清缓存」这种必漏的写法。
+  int _revision = 0;
+  int get revision => _revision;
+
   SyncConfig get sync => _sync;
+
+  /// 界面偏好（一次性提示的已读记录、启动是否自动扫描）。
+  UiPrefs get prefs => _prefs;
+
+  void setPrefs(UiPrefs prefs) {
+    _prefs = prefs;
+  }
 
   /// 所有未删除的收款单，按导入时间倒序（稳定的默认顺序）。
   List<Bill> get bills {
@@ -163,6 +228,14 @@ class BillStore {
 
   Future<void> load() async {
     await dirs.ensure();
+    // 先清空再读：load() 可能被调用多次（init 里总会读一次，测试里还会预读一次）。
+    // 以前只是往 _folders 里 add，重复读盘会让同一个目录出现两次 ——
+    // 表现是每次扫描把同一个相册列两遍（时间翻倍），而且「移除文件夹」删不干净。
+    _bills.clear();
+    _folders.clear();
+    _sync = const SyncConfig();
+    _prefs = const UiPrefs();
+    _loadWarning = '';
     final json = await readJsonFile(
       dirs.dataFile,
       onCorrupt: (path) => _loadWarning = '数据文件损坏，已备份到 $path（本次以空账本启动）',
@@ -197,8 +270,13 @@ class BillStore {
           lastSyncMessage: '${sync['msg'] ?? ''}',
         );
       }
+      final prefs = json['prefs'];
+      if (prefs is Map) {
+        _prefs = UiPrefs.fromJson(Map<String, Object?>.from(prefs));
+      }
     }
     _loaded = true;
+    _revision++;
   }
 
   /// 落盘串行化：并发调用会排队，绝不出现两个写手同时动 `data.json.tmp`。
@@ -230,6 +308,7 @@ class BillStore {
         'at': _sync.lastSyncAt,
         'msg': _sync.lastSyncMessage,
       },
+      'prefs': _prefs.toJson(),
     };
     await writeJsonAtomic(dirs.dataFile, payload);
   }
@@ -244,17 +323,20 @@ class BillStore {
       name: name,
       addedAt: DateTime.now().millisecondsSinceEpoch,
     ));
+    _revision++;
     return true;
   }
 
   void removeFolder(String id) {
     _folders.removeWhere((f) => f.id == id);
+    _revision++;
   }
 
   void touchFolder(String id, int at) {
     final i = _folders.indexWhere((f) => f.id == id);
     if (i < 0) return;
     _folders[i] = _folders[i].copyWith(lastScanAt: at);
+    _revision++;
   }
 
   /// 按本机路径找所属目录（用于「刷新日期」定位 SAF 树 / 判断文件是否真的消失）。
@@ -292,12 +374,14 @@ class BillStore {
   /// 插入或更新（同 id 覆盖）。
   void put(Bill bill) {
     _bills[bill.id] = bill;
+    _revision++;
   }
 
   void putAll(Iterable<Bill> bills) {
     for (final b in bills) {
       _bills[b.id] = b;
     }
+    _revision++;
   }
 
   /// 手工改金额（打上 manual，之后重新扫描不再覆盖）。
@@ -311,6 +395,7 @@ class BillStore {
       note: note,
       updatedAt: DateTime.now().millisecondsSinceEpoch,
     );
+    _revision++;
   }
 
   void setNote(String id, String note) {
@@ -320,6 +405,7 @@ class BillStore {
       note: note,
       updatedAt: DateTime.now().millisecondsSinceEpoch,
     );
+    _revision++;
   }
 
   /// 软删除（写墓碑，让删除也能同步到别的设备）。
@@ -330,6 +416,7 @@ class BillStore {
       deleted: true,
       updatedAt: DateTime.now().millisecondsSinceEpoch,
     );
+    _revision++;
   }
 
   /// 彻底清掉过期墓碑（默认 120 天），避免同步文件无限增长。
@@ -342,6 +429,7 @@ class BillStore {
     for (final id in gone) {
       _bills.remove(id);
     }
+    if (gone.isNotEmpty) _revision++;
     return gone.length;
   }
 
@@ -385,6 +473,9 @@ class BillStore {
     final tmp = File(p.join(dirs.thumbDir.path, '$name.tmp'));
     await tmp.writeAsBytes(bytes, flush: true);
     await tmp.rename(f.path);
+    // 同步下载回来的缩略图也要让「文件是否存在」的缓存失效，
+    // 否则列表会一直显示占位图，直到下次数据变更才突然出现图片。
+    _revision++;
   }
 
   /// 清掉没有对应记录（或记录已删）的缩略图。
@@ -404,6 +495,7 @@ class BillStore {
         } catch (_) {}
       }
     }
+    if (removed > 0) _revision++;
     return removed;
   }
 }

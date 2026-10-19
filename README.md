@@ -27,7 +27,9 @@
 ## 使用
 
 1. 首次启动点「导入相册」，选一个存放收款单截图的文件夹（可多选目录）。
-2. 自动识别金额并按金额升序排列；识别不出的显示「未识别」，点它手动填写。
+2. 导入后会扫一次并按金额升序排列；识别不出的显示「未识别」，点它手动填写。
+   之后**只有点「扫描识别」才会刷新**（打开应用不再自动扫相册，秒开）；
+   想恢复「启动自动扫描」：设置 → 图片来源文件夹 → 打开「启动时自动扫描」。
 3. 同步：右上角齿轮 → 填 WebDAV 地址 / 账号 / 密码 → 测试连接 → 立即同步。
    两台设备填同一个地址即可互通。
 
@@ -68,7 +70,7 @@
 export PATH=/opt/flutter/bin:$PATH
 flutter pub get
 flutter analyze
-flutter test                      # 70 项：OCR 回归 / 同步端到端 / 存储 / 扫描 / UI / 回归
+flutter test                      # 77 项：OCR 回归 / 同步端到端 / 存储 / 扫描 / UI / 回归 / 启动与提示
 flutter build apk --debug --target-platform=android-arm64
 ```
 
@@ -85,7 +87,8 @@ flutter build apk --debug --target-platform=android-arm64
 | `test/scanner_test.dart` | 增量扫描、手工金额不被覆盖、删除留墓碑、跨设备记录不误删 |
 | `test/regression_test.dart` | 列目录失败不误删、删后重扫不复活、并发落盘、定位屏外记录、删除优先合并 |
 | `test/boot_sync_test.dart` | 启动时真的会跑一次自动同步（scan 与 sync 不互相抢 _busy） |
-| `test/app_ui_test.dart` | 空态、排序、搜索、编辑、删除、设置页 |
+| `test/app_ui_test.dart` | 空态、排序、搜索、编辑、删除、设置页、提示条真的能显示、说明只弹一次 |
+| `test/ux_prefs_test.dart` | 启动不自动扫相册（手动才刷新）/ 开关生效 / 一次性说明持久化 / 提示去重 / 列表缓存失效 |
 
 同步测试用 `test/support/test_dav_server.dart` 起一个内存 WebDAV 服务器，
 不依赖外网，也能注入 412 冲突与 500 故障。

@@ -297,6 +297,8 @@ void main() {
       store.addFolder('/album', 'album');
       controller = AppController(dirs: dirs, store: store, source: source);
       await controller.init();
+      // 启动不再自动扫相册：要手动扫一次才会有记录（这正是本次的改动）
+      await controller.scan(force: false);
     });
     await tester.pumpWidget(WxBillsApp(controller: controller));
     await tester.pumpAndSettle();

@@ -228,4 +228,45 @@ void main() {
 
     await cleanup(tester, tmp);
   });
+
+  testWidgets('提示条真的会显示（ScaffoldMessenger 挂对了地方）', (tester) async {
+    final (tmp, controller) = await buildController(tester, bills: [sample('a', 1050)]);
+    await tester.pumpWidget(WxBillsApp(controller: controller));
+    await tester.pumpAndSettle();
+
+    controller.showToast('已复制图片');
+    await tester.pump();
+
+    expect(find.byType(SnackBar), findsOneWidget,
+        reason: '之前 context 取在 MaterialApp 之上，maybeOf 返回 null，所有提示都不显示');
+    expect(find.text('已复制图片'), findsOneWidget);
+
+    await tester.pump(const Duration(seconds: 4));
+    await cleanup(tester, tmp);
+  });
+
+  testWidgets('「刷新日期」的说明只弹第一次，之后直接开始', (tester) async {
+    final (tmp, controller) = await buildController(tester, bills: [sample('a', 1050)]);
+    await tester.pumpWidget(WxBillsApp(controller: controller));
+    await tester.pumpAndSettle();
+
+    // 第一次：弹说明
+    await tester.tap(find.byIcon(Icons.refresh_rounded).first);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('刷新 1 张图片的日期'), findsOneWidget);
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+
+    // 点过「开始」才算看过：这里用控制器直接标记，模拟用户确认过一次
+    await tester.runAsync(() => controller.markTipSeen(TipKeys.refreshDate));
+    await tester.pumpAndSettle();
+
+    // 第二次：不再弹说明
+    await tester.tap(find.byIcon(Icons.refresh_rounded).first);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('刷新 1 张图片的日期'), findsNothing,
+        reason: '同一段说明每次点都弹一遍是噪音');
+
+    await cleanup(tester, tmp);
+  });
 }

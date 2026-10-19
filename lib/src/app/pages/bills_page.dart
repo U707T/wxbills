@@ -35,11 +35,25 @@ class _BillsPageState extends State<BillsPage> {
     super.initState();
     c.addListener(_onChanged);
     _searchCtrl.text = c.query;
+    _searchHadText = _searchCtrl.text.isNotEmpty;
+    // 输入框的清空按钮显隐取决于「当前是否为空」，所以要跟着输入变化重建；
+    // 之前只在 setState 时才刷，输入后 ✕ 一直不出现。
+    _searchCtrl.addListener(_onSearchChanged);
+  }
+
+  bool _searchHadText = false;
+
+  void _onSearchChanged() {
+    final has = _searchCtrl.text.isNotEmpty;
+    if (has == _searchHadText) return;
+    _searchHadText = has;
+    if (mounted) setState(() {});
   }
 
   @override
   void dispose() {
     c.removeListener(_onChanged);
+    _searchCtrl.removeListener(_onSearchChanged);
     _searchCtrl.dispose();
     _scrollCtrl.dispose();
     _searchFocus.dispose();
@@ -121,7 +135,17 @@ class _BillsPageState extends State<BillsPage> {
     );
   }
 
+  /// 刷新图片日期。
+  ///
+  /// 那段「会把入库时间改成现在、必要时重建文件」的说明只在**第一次**弹，
+  /// 之后直接执行（同一句话每次点都看一遍纯属噪音）。想再看一次：
+  /// 设置 → 重新显示所有说明。
   Future<void> _confirmRefresh(List<Bill> list) async {
+    if (list.isEmpty) return;
+    if (c.hasSeenTip(TipKeys.refreshDate)) {
+      await c.refreshDates(list);
+      return;
+    }
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -132,7 +156,8 @@ class _BillsPageState extends State<BillsPage> {
             '会把图片的「入库时间」改成现在——QQ 和相册判定新增图片看的就是这个，'
             '只改文件修改时间是没用的。\n\n'
             '改不动媒体库时，会在同一目录重建一个新文件（内容不变）再删掉旧的，'
-            '这样必被当成新图；新建失败则旧文件原样保留。',
+            '这样必被当成新图；新建失败则旧文件原样保留。\n\n'
+            '这条说明只显示这一次，之后点「刷新日期」会直接开始。',
             style: TextStyle(fontSize: 13, height: 1.6),
           ),
         ),
@@ -145,8 +170,44 @@ class _BillsPageState extends State<BillsPage> {
       ),
     );
     if (ok == true) {
+      await c.markTipSeen(TipKeys.refreshDate);
       await c.refreshDates(list);
     }
+  }
+
+  /// 标题栏副标题：记录数 + 合计 + 异常项。
+  String _subtitle() {
+    final buf = StringBuffer(
+        '共 ${c.totalCount} 张 · 合计 ¥${Bill.formatCents(c.totalSumCents)}');
+    if (c.store.unrecognizedCount > 0) {
+      buf.write(' · ${c.store.unrecognizedCount} 张未识别');
+    }
+    if (c.store.reviewCount > 0) {
+      buf.write(' · ${c.store.reviewCount} 张待核对');
+    }
+    return buf.toString();
+  }
+
+  /// 工具条右侧那句：没筛选时显示「上次扫描」，有筛选时显示筛选结果。
+  ///
+  /// 以前这里永远是「当前 N 张 · ¥X」，没筛选时和标题栏的「共 N 张 · 合计 ¥X」
+  /// 完全重复。现在把位置让给「上次扫描」——启动不再自动扫描之后，
+  /// 数据是什么时候的必须一眼能看到。
+  String _toolbarHint() {
+    if (c.query.trim().isEmpty) {
+      final at = c.lastScanAt;
+      if (at == 0) return c.totalCount == 0 ? '还没扫描过' : '未记录扫描时间';
+      return '上次扫描 ${_ago(at)}';
+    }
+    return '当前 ${c.visibleBills.length} 张 · ¥${Bill.formatCents(c.visibleSumCents)}';
+  }
+
+  static String _ago(int ms) {
+    final d = DateTime.now().difference(DateTime.fromMillisecondsSinceEpoch(ms));
+    if (d.inMinutes < 1) return '刚刚';
+    if (d.inMinutes < 60) return '${d.inMinutes} 分钟前';
+    if (d.inHours < 24) return '${d.inHours} 小时前';
+    return '${d.inDays} 天前';
   }
 
   // ---------------------------------------------------------------- 构建
@@ -165,9 +226,7 @@ class _BillsPageState extends State<BillsPage> {
       children: [
         GreenHeader(
           title: '收款单管理',
-          subtitle: '共 ${c.totalCount} 张 · 合计 ¥${Bill.formatCents(c.totalSumCents)}'
-              '${c.store.unrecognizedCount > 0 ? ' · ${c.store.unrecognizedCount} 张未识别' : ''}'
-              '${c.store.reviewCount > 0 ? ' · ${c.store.reviewCount} 张待核对' : ''}',
+          subtitle: _subtitle(),
           actions: [
             HeaderIconButton(
               icon: Icons.restart_alt,
@@ -175,8 +234,11 @@ class _BillsPageState extends State<BillsPage> {
               onPressed: () => c.scan(force: true),
             ),
             HeaderIconButton(
-              icon: Icons.sync_rounded,
-              tooltip: '立即同步（WebDAV）',
+              // 上次同步失败：图标直接换成「云断开」，不用等下次弹窗才知道
+              icon: c.syncFailed ? Icons.cloud_off_rounded : Icons.sync_rounded,
+              tooltip: c.syncFailed
+                  ? '上次同步失败：${c.store.sync.lastSyncMessage}\n点一下重试'
+                  : '立即同步（WebDAV）',
               onPressed: () => c.runSync(),
             ),
             HeaderIconButton(
@@ -200,14 +262,26 @@ class _BillsPageState extends State<BillsPage> {
                   title: c.store.folders.isEmpty ? '还没有导入相册' : '没有收款单',
                   detail: c.store.folders.isEmpty
                       ? '授权一个存放收款单截图的文件夹，\n应用会自动识别每张图的金额并按金额排序。'
-                      : '当前筛选条件下没有记录。',
+                      : c.query.trim().isNotEmpty
+                          ? '当前筛选条件下没有记录。'
+                          : c.totalCount == 0
+                              // 启动不再自动扫描，所以「有目录但没记录」时
+                              // 直接告诉用户下一步该点哪里，而不是让他以为相册是空的
+                              ? '相册还没扫描过。\n点下面的「扫描识别」读取一次即可，之后只有你点它才会刷新。'
+                              : '相册里没有新的图片。',
                   action: c.store.folders.isEmpty
                       ? FilledButton.icon(
                           onPressed: c.addFolder,
                           icon: const Icon(Icons.folder_open, size: 18),
                           label: const Text('导入文件夹'),
                         )
-                      : null,
+                      : c.totalCount == 0 && c.query.trim().isEmpty
+                          ? FilledButton.icon(
+                              onPressed: () => c.scan(force: false),
+                              icon: const Icon(Icons.document_scanner_outlined, size: 18),
+                              label: const Text('扫描识别'),
+                            )
+                          : null,
                 )
               : ContentWidth(
                   child: ListView.separated(
@@ -286,7 +360,6 @@ class _BillsPageState extends State<BillsPage> {
                               onPressed: () {
                                 _searchCtrl.clear();
                                 c.setQuery('');
-                                setState(() {});
                               },
                             ),
                     ),
@@ -320,13 +393,18 @@ class _BillsPageState extends State<BillsPage> {
                   ),
                 ),
                 const SizedBox(width: 10),
-                Text(
-                  '当前 ${c.visibleBills.length} 张 · ¥${Bill.formatCents(c.visibleSumCents)}',
-                  style: TextStyle(
-                    fontSize: 11.5,
-                    color: Theme.of(context).brightness == Brightness.dark
-                        ? Palette.darkTextDim
-                        : Palette.textDim,
+                Flexible(
+                  child: Text(
+                    _toolbarHint(),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.right,
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      color: Theme.of(context).brightness == Brightness.dark
+                          ? Palette.darkTextDim
+                          : Palette.textDim,
+                    ),
                   ),
                 ),
               ],
@@ -367,11 +445,15 @@ class _BillsPageState extends State<BillsPage> {
             const SizedBox(width: 8),
             Expanded(
               child: ActionButton(
-                icon: Icons.document_scanner_outlined,
-                label: '扫描识别',
+                icon: c.scanning
+                    ? Icons.stop_circle_outlined
+                    : Icons.document_scanner_outlined,
+                label: c.scanning ? '停止扫描' : '扫描识别',
                 primary: true,
-                busy: c.busy,
-                onPressed: () => c.scan(force: false),
+                // 扫描中同一个按钮变成「停止」；同步 / 刷新日期在跑时只变灰，
+                // 别让它跟着转圈（用户会以为是扫描在跑）。
+                enabled: c.scanning || !c.busy,
+                onPressed: c.scanning ? c.cancelBusy : () => c.scan(force: false),
               ),
             ),
             const SizedBox(width: 8),

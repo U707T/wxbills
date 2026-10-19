@@ -444,6 +444,7 @@ class ActionButton extends StatelessWidget {
     required this.onPressed,
     this.primary = false,
     this.busy = false,
+    this.enabled = true,
   });
 
   final IconData icon;
@@ -452,12 +453,15 @@ class ActionButton extends StatelessWidget {
   final bool primary;
   final bool busy;
 
+  /// 只变灰、不转圈：用于「别的任务在跑，这个按钮现在按了也没用」。
+  final bool enabled;
+
   @override
   Widget build(BuildContext context) {
     return SizedBox(
       width: double.infinity,
       child: FilledButton.tonalIcon(
-        onPressed: busy ? null : onPressed,
+        onPressed: (busy || !enabled) ? null : onPressed,
         icon: busy
             ? const SizedBox(
                 width: 14,

@@ -1,12 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- 自适应图标前景：白卡 + 绿色加号 + 三条明细线。
-     内容全部落在半径 36 的安全圆内（系统会按各家遮罩裁切外圈）。 -->
+     注意画布是 108x108，但系统会按各家遮罩裁掉外圈，**实际可见区域只有中间
+     约 72x72**（安全圆半径 36）。所以图形本身必须比「看起来合适」再小一圈，
+     否则装上桌面会显得比旁边的图标胖一圈（上一版就是这样：白卡占可见区 78%）。
+     这里用 group 统一缩到 86%，图形中心仍在 (54,54)，改动时只动 scale。 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <path android:fillColor="#FFFFFF" android:pathData="M34,32 h40 a8,8 0 0 1 8,8 v28 a8,8 0 0 1 -8,8 h-40 a8,8 0 0 1 -8,-8 v-28 a8,8 0 0 1 8,-8 z" />
-    <path android:fillColor="#07C160" android:pathData="M41,46 h5 v5.5 h5.5 v5 h-5.5 v5.5 h-5 v-5.5 h-5.5 v-5 h5.5 z" />
-    <path android:fillColor="#1A1A1A" android:pathData="M57,41h20v5h-20zM57,51.5h20v5h-20zM57,62h20v5h-20z" />
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:scaleX="0.86"
+        android:scaleY="0.86">
+        <path android:fillColor="#FFFFFF" android:pathData="M34,32 h40 a8,8 0 0 1 8,8 v28 a8,8 0 0 1 -8,8 h-40 a8,8 0 0 1 -8,-8 v-28 a8,8 0 0 1 8,-8 z" />
+        <path android:fillColor="#07C160" android:pathData="M41,46 h5 v5.5 h5.5 v5 h-5.5 v5.5 h-5 v-5.5 h-5.5 v-5 h5.5 z" />
+        <path android:fillColor="#1A1A1A" android:pathData="M57,41h20v5h-20zM57,51.5h20v5h-20zM57,62h20v5h-20z" />
+    </group>
 </vector>

@@ -12,6 +12,19 @@ import '../model/bill.dart';
 import '../platform/photo_source.dart';
 import '../webdav/sync.dart';
 
+/// 「一次性说明」的键。看过一次就记在 [UiPrefs.seenTips] 里，之后不再打扰。
+///
+/// 只放**纯说明性**的提示：危险操作（删除）的确认永远每次都问。
+class TipKeys {
+  TipKeys._();
+
+  /// 刷新日期那段长说明（会把入库时间改成现在、必要时重建文件）。
+  static const String refreshDate = 'refresh_date';
+
+  /// 识别诊断卡片的长说明。
+  static const String diagnose = 'diagnose';
+}
+
 /// 排序方式。
 enum SortMode {
   amountAsc('金额 ↑'),
@@ -86,19 +99,69 @@ class AppController extends ChangeNotifier {
   bool _refreshing = false;
   bool get cancellable => _scanning || _refreshing;
 
+  /// 只表示「正在扫描相册」——底部按钮用它决定转圈还是显示「停止」。
+  /// 不能复用 [busy]：同步时也在 busy，扫描按钮不该跟着变灰。
+  bool get scanning => _scanning;
+
+  /// 上一次扫描完成的时间（毫秒，取各目录 lastScanAt 的最大值；没扫过为 0）。
+  int get lastScanAt =>
+      store.folders.fold(0, (m, f) => f.lastScanAt > m ? f.lastScanAt : m);
+
+  // ---------------------------------------------------------------- 缓存 / 节流
+
+  /// [visibleBills] 的缓存：列表页每帧会取三次（列表、合计、底部计数），
+  /// 500 条记录每次重排 + 重建列表是实打实的卡顿来源。
+  ///
+  /// 用 [BillStore.revision] 做失效判断，而不是在各个改动点手动清缓存——
+  /// 后者漏一处就会显示旧数据（这是比卡顿更难查的 bug）。
+  List<Bill>? _visibleCache;
+  int _visibleCacheRevision = -1;
+  String _visibleCacheQuery = '';
+  SortMode? _visibleCacheSort;
+  int _visibleSumCache = 0;
+
+  /// 扫描进度通知节流：一张图一次 notifyListeners 会让整页重建几百次，
+  /// 进度条根本看不出区别，却把主线程占满（列表滚动会明显卡）。
+  DateTime _lastProgressNotify = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// 相同文案的 toast 在 4 秒内只弹一次：扫描 / 自动同步连点几下时
+  /// 否则会排队弹一串一模一样的「已是最新，无需同步」。
+  String _lastToast = '';
+  DateTime _lastToastAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// dispose 之后还有异步回调（扫描收尾、同步、闪烁定时器）会走到这里。
+  /// 不对已销毁的 ChangeNotifier 调 notifyListeners，否则直接抛
+  /// 「A AppController was used after being disposed」。
+  bool _disposed = false;
+
   // ---------------------------------------------------------------- 初始化
 
+  /// 启动：只加载本地数据 + 一次轻量的自动同步，**不扫描相册**。
+  ///
+  /// 之前每次打开都会自动增量扫一遍相册（几百上千张的目录列一次就要好几秒，
+  /// 首屏一直转圈），而且结果通常和上次完全一样。现在改成：
+  ///  * 用户点「扫描识别」才真正去读相册（见 [scan]）；
+  ///  * 需要开机自动扫描的人，可以在设置里打开「启动时自动扫描」。
+  /// 自动同步仍然保留（它只传一份几十 KB 的快照，比列相册目录便宜得多，
+  /// 而且不拉取的话另一台设备的改动永远看不到）。
   Future<void> init() async {
-    await store.load();
+    try {
+      // 已经载入过就不再读一次：重复 load 会把内存里刚改的东西（例如刚导入的目录）
+      // 用磁盘上的旧快照覆盖掉，而且白白多一次 IO。
+      if (!store.loaded) await store.load();
+    } catch (e) {
+      // 读盘失败（目录不可写 / 权限被撤）不能把界面永远卡在转圈上：
+      // 照常进主界面，让用户能看到「导入相册」并自己处理。
+      showToast('读取本地数据失败：$e');
+    }
     _ready = true;
-    notifyListeners();
+    _notify();
     if (store.loadWarning.isNotEmpty) showToast(store.loadWarning);
 
-    // 首次进入：没有目录就提示导入；有目录就静默增量扫描
     if (store.folders.isEmpty) return;
-    // 先扫描、再同步：scan / runSync 共用一个 _busy 守卫，同时发起会让后一个
-    // 静默返回（这正是「启动自动同步从来没执行过」的原因）。
-    await scan(force: false, silent: true);
+    if (store.prefs.autoScanOnBoot) {
+      await scan(force: false, silent: true);
+    }
     if (store.sync.configured && store.sync.autoSync) {
       await runSync(silent: true);
     }
@@ -108,8 +171,22 @@ class AppController extends ChangeNotifier {
 
   List<Bill> get allBills => store.bills;
 
-  /// 当前筛选 + 排序后的列表。
+  /// 当前筛选 + 排序后的列表（带缓存，见 [_visibleCache]）。
   List<Bill> get visibleBills {
+    _ensureVisible();
+    return _visibleCache!;
+  }
+
+  void _ensureVisible() {
+    final rev = store.revision;
+    final cached = _visibleCache;
+    if (cached != null &&
+        rev == _visibleCacheRevision &&
+        _query == _visibleCacheQuery &&
+        _sort == _visibleCacheSort) {
+      return;
+    }
+
     final q = _query.trim();
     var list = store.liveBills;
 
@@ -161,11 +238,20 @@ class AppController extends ChangeNotifier {
         sorted.sort((a, b) => b.importedAt.compareTo(a.importedAt));
         break;
     }
-    return sorted;
+
+    _visibleCache = sorted;
+    _visibleCacheRevision = rev;
+    _visibleCacheQuery = _query;
+    _visibleCacheSort = _sort;
+    _visibleSumCache =
+        sorted.fold(0, (s, b) => s + (b.amountCents ?? 0));
   }
 
-  int get visibleSumCents =>
-      visibleBills.fold(0, (s, b) => s + (b.amountCents ?? 0));
+  int get visibleSumCents {
+    // 借 _ensureVisible 把合计一起算掉，避免每次构建都再遍历一遍列表
+    _ensureVisible();
+    return _visibleSumCache;
+  }
 
   int get totalCount => store.count;
   int get totalSumCents => store.sumCents;
@@ -173,20 +259,25 @@ class AppController extends ChangeNotifier {
   void setSort(SortMode mode) {
     if (_sort == mode) return;
     _sort = mode;
-    notifyListeners();
+    _notify();
   }
 
   void setQuery(String q) {
     if (_query == q) return;
     _query = q;
-    notifyListeners();
+    _notify();
   }
 
   /// 跳到第一个匹配项：返回目标 id（界面负责滚动 + 闪烁）。
   String? locateByAmount(String text) {
-    final target = Bill.parseYuan(text);
+    final raw = text.trim();
+    if (raw.isEmpty) {
+      showToast('先输入金额，例如 31.5');
+      return null;
+    }
+    final target = Bill.parseYuan(raw);
     if (target == null) {
-      showToast('金额格式不对');
+      showToast('金额格式不对（最多两位小数，例如 31.5）');
       return null;
     }
     final list = visibleBills;
@@ -215,11 +306,11 @@ class AppController extends ChangeNotifier {
     }
     final id = list[hit].id;
     _flashId = id;
-    notifyListeners();
+    _notify();
     Timer(const Duration(milliseconds: 1600), () {
       if (_flashId == id) {
         _flashId = null;
-        notifyListeners();
+        _notify();
       }
     });
     return id;
@@ -229,21 +320,21 @@ class AppController extends ChangeNotifier {
 
   void setAmount(String id, int? cents, {String? note}) {
     store.setAmount(id, cents, note: note);
-    notifyListeners();
+    _notify();
     _persist();
     _scheduleAutoSync();
   }
 
   void setNote(String id, String note) {
     store.setNote(id, note);
-    notifyListeners();
+    _notify();
     _persist();
     _scheduleAutoSync();
   }
 
   void removeBill(String id) {
     store.remove(id);
-    notifyListeners();
+    _notify();
     _persist();
     _scheduleAutoSync();
   }
@@ -282,7 +373,7 @@ class AppController extends ChangeNotifier {
         return;
       }
       await store.save();
-      notifyListeners();
+      _notify();
       await scan(force: false);
     } catch (e) {
       showToast('导入失败：$e');
@@ -292,11 +383,15 @@ class AppController extends ChangeNotifier {
   Future<void> removeFolder(String id) async {
     store.removeFolder(id);
     await store.save();
-    notifyListeners();
+    _notify();
   }
 
   // ---------------------------------------------------------------- 扫描
 
+  /// 扫描相册（用户点「扫描识别」/「重新识别全部」时调用）。
+  ///
+  /// [force] 忽略文件修改时间，全部重新识别；[silent] 表示非用户主动触发
+  /// （目前只有设置里打开的「启动时自动扫描」会用），此时不弹结果提示。
   Future<void> scan({bool force = false, bool silent = false}) async {
     if (_busy) {
       if (!silent) showToast('正在忙，稍后再试');
@@ -312,20 +407,23 @@ class AppController extends ChangeNotifier {
     try {
       final result = await scanner.scanAll(
         forceRecheck: force,
-        // 启动时的静默扫描只做增量；用户主动点「扫描识别」时才重试未识别记录
+        // 用户主动点「扫描识别」时才重试未识别记录
         retryUnrecognized: !silent,
         onProgress: (p) {
           if (p.total > 0) {
-            _setBusy(true, '识别 ${p.done}/${p.total} · ${p.currentName}',
-                p.fraction);
+            _setBusyThrottled(
+                '识别 ${p.done}/${p.total} · ${p.currentName}', p.fraction);
           } else {
-            _setBusy(true, p.message.isEmpty ? '准备中…' : p.message, 0);
+            _setBusyThrottled(p.message.isEmpty ? '准备中…' : p.message, 0);
           }
         },
       );
       _lastScanMessage = result.message;
       _setBusy(false, '', 0);
-      notifyListeners();
+      _notify();
+      // 用户亲手点的「扫描识别」一定要有回音（哪怕结果是「没变化」），
+      // 否则点了没反应会让人以为按钮坏了；非用户触发（启动自动扫描）
+      // 只在真有更新时说话，避免开机就弹一条没用的提示。
       if (!silent || result.updated > 0) showToast(result.message);
       if (result.updated > 0) _scheduleAutoSync();
     } catch (e) {
@@ -333,6 +431,7 @@ class AppController extends ChangeNotifier {
       showToast('扫描失败：$e');
     } finally {
       _scanning = false;
+      _notify();
       _flushQueuedSync();
     }
   }
@@ -358,7 +457,7 @@ class AppController extends ChangeNotifier {
       }
       final cents = Bill.centsFromYuan(r.value);
       store.setAmount(id, cents);
-      notifyListeners();
+      _notify();
       await _persist();
       showToast('识别到 ¥${Bill.formatCents(cents ?? 0)}'
           '（置信度 ${(r.confidence * 100).toStringAsFixed(0)}%）');
@@ -418,7 +517,7 @@ class AppController extends ChangeNotifier {
       // 每 10 张落一次盤：中途被杀时已回写的 path 不能丢，否则下次扫描会把
       // 这些记录当成「文件已消失」而打墓碑。
       if (i % 10 == 9) await store.save();
-      _setBusy(true, '刷新 ${i + 1}/${list.length}', (i + 1) / list.length);
+      _setBusyThrottled('刷新 ${i + 1}/${list.length}', (i + 1) / list.length);
     }
     } catch (e) {
       showToast('刷新中断：$e');
@@ -426,7 +525,7 @@ class AppController extends ChangeNotifier {
       _refreshing = false;
       await store.save();
       _setBusy(false, '', 0);
-      notifyListeners();
+      _notify();
       final stopped = _cancelRequested && ok + fail < list.length;
       final detail = failures.isEmpty ? '' : '（${failures.join('；')}）';
       showToast('已刷新 $ok 张${fail > 0 ? '，$fail 张失败' : ''}'
@@ -438,13 +537,29 @@ class AppController extends ChangeNotifier {
 
   void updateSync(SyncConfig config) {
     store.setSync(config);
-    notifyListeners();
+    _notify();
+    unawaited(_persist());
+  }
+
+  /// 静默保存同步配置（设置页退出时用）。
+  ///
+  /// 刻意不 notifyListeners：调用发生在 dispose 里，此时树正在卸载，
+  /// 通知会让别的组件 setState，直接抛「setState() called after dispose」。
+  void saveSyncSilently(SyncConfig config) {
+    store.setSync(config);
     unawaited(_persist());
   }
 
   Future<String> testSync() async {
-    final engine = SyncEngine(store);
-    return engine.testConnection();
+    // 地址清空 / 写错时 WebDavClient 会抛 ArgumentError，这里必须兜住：
+    // 否则设置页的「测试连接」会一直转圈（_testing 永远不回落）。
+    if (!store.sync.configured) return '先填写服务器地址';
+    try {
+      final engine = SyncEngine(store);
+      return await engine.testConnection();
+    } catch (e) {
+      return '测试失败：$e';
+    }
   }
 
   Future<void> runSync({bool silent = false}) async {
@@ -463,16 +578,26 @@ class AppController extends ChangeNotifier {
     try {
       final result = await sync.run(onProgress: (p) {
         final label = p.message.isEmpty ? p.step : '${p.step} ${p.message}';
-        _setBusy(true, label.trim(), p.fraction);
+        _setBusyThrottled(label.trim(), p.fraction,
+            interval: const Duration(milliseconds: 200));
       });
       _setBusy(false, '', 0);
-      notifyListeners();
-      if (!silent || !result.ok) showToast(result.message);
+      _notify();
+      // 静默同步一句都不弹：成功时那句「已是最新」每天要弹好几次，
+      // 失败时弹的又是一条用户当场没法处理的网络错误。
+      // 结果都记在 store.sync.lastSyncMessage 里，界面上有入口能看到（见
+      // [syncFailed]），不会「悄悄失败」。
+      if (!silent) showToast(result.message);
     } catch (e) {
       _setBusy(false, '', 0);
       showToast('同步失败：$e');
     }
   }
+
+  /// 最近一次同步是否失败（启动时的静默同步失败不弹提示，靠这个标记告诉界面）。
+  bool get syncFailed =>
+      store.sync.configured &&
+      store.sync.lastSyncMessage.contains('失败');
 
   void _scheduleAutoSync() {
     if (!store.sync.configured || !store.sync.autoSync) return;
@@ -520,6 +645,12 @@ class AppController extends ChangeNotifier {
 
   // ---------------------------------------------------------------- 小工具
 
+  /// 安全通知：dispose 之后（扫描收尾、定时器、同步回调）不再触碰已销毁的对象。
+  void _notify() {
+    if (_disposed) return;
+    notifyListeners();
+  }
+
   /// 用户点「停止」：扫描会尽快收尾（已识别的会落盘），刷新日期在下一张前停。
   /// 同步不支持中断（一次 PUT 很快，打断反而可能留下半截状态）。
   void cancelBusy() {
@@ -530,27 +661,94 @@ class AppController extends ChangeNotifier {
   }
 
   void showToast(String message) {
+    if (message.isEmpty) return;
+    final now = DateTime.now();
+    // 同一句话 4 秒内只弹一次：连点、自动同步重试时会连着弹一串一样的提示
+    if (message == _lastToast && now.difference(_lastToastAt).inSeconds < 4) {
+      return;
+    }
+    _lastToast = message;
+    _lastToastAt = now;
     _toast = message;
     _toastSeq++;
-    notifyListeners();
+    _notify();
+  }
+
+  // ---------------------------------------------------------------- 一次性说明
+
+  /// 这条说明是否已经看过（看过就不再弹）。
+  bool hasSeenTip(String key) => store.prefs.hasSeen(key);
+
+  /// 标记「看过了」并落盘。之后的启动不会再弹同一个说明。
+  Future<void> markTipSeen(String key) async {
+    if (store.prefs.hasSeen(key)) return;
+    store.setPrefs(store.prefs.markSeen(key));
+    _notify();
+    await _persist();
+  }
+
+  /// 设置页的「重新显示所有说明」：把已读记录清掉，下次操作时会再弹一次。
+  Future<void> resetTips() async {
+    store.setPrefs(store.prefs.clearTips());
+    _notify();
+    await _persist();
+  }
+
+  /// 启动时是否自动扫描（默认关）。
+  bool get autoScanOnBoot => store.prefs.autoScanOnBoot;
+
+  Future<void> setAutoScanOnBoot(bool value) async {
+    store.setPrefs(store.prefs.copyWith(autoScanOnBoot: value));
+    _notify();
+    await _persist();
   }
 
   void _setBusy(bool busy, String label, double fraction) {
     _busy = busy;
     _busyLabel = label;
     _busyFraction = fraction;
-    notifyListeners();
+    _notify();
+  }
+
+  /// 扫描进度的节流版：至少间隔 [interval] 才推一次界面，最后一条不丢
+  /// （调用方在扫描结束时还会再 _setBusy 一次，所以收尾状态一定准确）。
+  void _setBusyThrottled(
+    String label,
+    double fraction, {
+    Duration interval = const Duration(milliseconds: 120),
+  }) {
+    final now = DateTime.now();
+    if (now.difference(_lastProgressNotify) < interval) return;
+    _lastProgressNotify = now;
+    _setBusy(true, label, fraction);
   }
 
   /// 缩略图文件（不存在返回 null）。
+  ///
+  /// 走一层缓存：列表每帧都会为每个可见行问一次，`existsSync()` 是同步文件 IO，
+  /// 一帧问十几次会把滚动卡住。缓存以 [BillStore.revision] 为界失效
+  /// （扫描 / 同步写缩略图都会让 revision 变化）。
+  final Map<String, bool> _thumbExists = {};
+  int _thumbCacheRevision = -1;
+
   File? thumbFileOf(Bill bill) {
     if (bill.thumb.isEmpty) return null;
+    if (_thumbCacheRevision != store.revision) {
+      _thumbExists.clear();
+      _thumbCacheRevision = store.revision;
+    }
     final f = dirs.thumbFile(bill.thumb);
-    return f.existsSync() ? f : null;
+    final cached = _thumbExists[bill.thumb];
+    if (cached == true) return f;
+    if (cached == false) return null;
+    final exists = f.existsSync();
+    _thumbExists[bill.thumb] = exists;
+    return exists ? f : null;
   }
 
   @override
   void dispose() {
+    _disposed = true;
     _autoSyncTimer?.cancel();
     scanner.cancel();
     super.dispose();

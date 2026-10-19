@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -29,6 +31,9 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _diagnosing = false;
   String _diagnosis = '';
 
+  /// WebDAV 填写说明是否展开：默认只在「还没配好」时展开。
+  late bool _helpOpen;
+
   AppController get c => widget.controller;
 
   @override
@@ -41,18 +46,47 @@ class _SettingsPageState extends State<SettingsPage> {
     _pass = TextEditingController(text: cfg.password);
     _insecure = cfg.allowInsecureTls;
     _auto = cfg.autoSync;
+    // 账号密码还没填全 → 说明铺开（用户正在照着填）；已经能用 → 收起
+    _helpOpen = cfg.username.isEmpty || cfg.password.isEmpty;
     c.addListener(_onChanged);
     _url.addListener(_onUrlChanged);
   }
 
+  /// 设置页退出时把改动落盘：用户改完开关直接按返回，不点「保存」也不会丢。
   @override
   void dispose() {
+    // 只同步内存配置 + 排队落盘，不能 await（dispose 是同步的）。
+    // updateSync 内部已经是 unawaited(_persist())。
+    _saveQuietlyOnExit();
     c.removeListener(_onChanged);
     _url.removeListener(_onUrlChanged);
     _url.dispose();
     _user.dispose();
     _pass.dispose();
     super.dispose();
+  }
+
+  void _saveQuietlyOnExit() {
+    try {
+      final next = SyncConfig(
+        url: _url.text.trim(),
+        username: _user.text.trim(),
+        password: _pass.text,
+        allowInsecureTls: _insecure,
+        autoSync: _auto,
+        lastSyncAt: c.store.sync.lastSyncAt,
+        lastSyncMessage: c.store.sync.lastSyncMessage,
+      );
+      if (next.url != c.store.sync.url ||
+          next.username != c.store.sync.username ||
+          next.password != c.store.sync.password ||
+          next.allowInsecureTls != c.store.sync.allowInsecureTls ||
+          next.autoSync != c.store.sync.autoSync) {
+        c.saveSyncSilently(next);
+      }
+    } catch (_) {
+      // 退出路径上不要因为保存失败把页面弄崩
+    }
   }
 
   void _onChanged() {
@@ -64,7 +98,7 @@ class _SettingsPageState extends State<SettingsPage> {
     if (mounted) setState(() {});
   }
 
-  void _save() {
+  void _save({bool quiet = false}) {
     c.updateSync(SyncConfig(
       url: _url.text.trim(),
       username: _user.text.trim(),
@@ -74,11 +108,11 @@ class _SettingsPageState extends State<SettingsPage> {
       lastSyncAt: c.store.sync.lastSyncAt,
       lastSyncMessage: c.store.sync.lastSyncMessage,
     ));
-    c.showToast('已保存');
+    if (!quiet) c.showToast('已保存');
   }
 
   Future<void> _test() async {
-    _save();
+    _save(quiet: true);
     setState(() {
       _testing = true;
       _testResult = '';
@@ -148,14 +182,34 @@ class _SettingsPageState extends State<SettingsPage> {
             ],
           ),
           const SizedBox(height: 4),
-          const Text(
-            '默认用坚果云，地址已填好，只需要再填账号和「应用密码」：'
-            '坚果云网页版 → 账户信息 → 安全选项 → 添加应用密码（直接用登录密码会 401）。'
-            '也可以换成 Nextcloud / Synology 的 WebDAV 地址。\n'
-            '「测试连接」会真的去读一次目录，目录不存在会自动建出来，'
-            '并把最终路径回显出来——路径通不通，一眼能看到。',
-            style: TextStyle(fontSize: 12, height: 1.55, color: Palette.textDim),
-          ),
+          // 这段「怎么拿应用密码」的说明只在还没配好时铺开；
+          // 配好之后收成一行，需要时点「填写说明」再看。
+          // 设置页最常被打开的时机是「已经能用、只想改个开关」，
+          // 每次都被这一大段文字挤走半屏很碍事。
+          if (_helpOpen)
+            const Text(
+              '默认用坚果云，地址已填好，只需要再填账号和「应用密码」：'
+              '坚果云网页版 → 账户信息 → 安全选项 → 添加应用密码（直接用登录密码会 401）。'
+              '也可以换成 Nextcloud / Synology 的 WebDAV 地址。\n'
+              '「测试连接」会真的去读一次目录，目录不存在会自动建出来，'
+              '并把最终路径回显出来——路径通不通，一眼能看到。',
+              style: TextStyle(fontSize: 12, height: 1.55, color: Palette.textDim),
+            )
+          else
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: () => setState(() => _helpOpen = true),
+                icon: const Icon(Icons.help_outline, size: 15),
+                label: const Text('填写说明（应用密码 / 路径）',
+                    style: TextStyle(fontSize: 12)),
+                style: TextButton.styleFrom(
+                  padding: EdgeInsets.zero,
+                  minimumSize: const Size(0, 28),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+              ),
+            ),
           const SizedBox(height: 14),
           TextField(
             controller: _url,
@@ -280,7 +334,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   primary: true,
                   busy: c.busy,
                   onPressed: () async {
-                    _save();
+                    _save(quiet: true);
                     await c.runSync();
                   },
                 ),
@@ -362,6 +416,22 @@ class _SettingsPageState extends State<SettingsPage> {
               ),
             ],
           ),
+          const SizedBox(height: 4),
+          // 默认关：相册几百上千张，每次打开都比对一遍既慢又没意义。
+          // 想要「打开就自动更新」的人自己打开这个开关。
+          SwitchListTile(
+            value: c.autoScanOnBoot,
+            onChanged: (v) => unawaited(c.setAutoScanOnBoot(v)),
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            title: const Text('启动时自动扫描', style: TextStyle(fontSize: 13.5)),
+            subtitle: Text(
+              c.autoScanOnBoot
+                  ? '每次打开应用都会扫一遍相册（大相册会慢几秒）'
+                  : '已关闭：只在点「扫描识别」时刷新，打开应用更快',
+              style: const TextStyle(fontSize: 11.5, color: Palette.textDim),
+            ),
+          ),
         ],
       ),
     );
@@ -390,6 +460,8 @@ class _SettingsPageState extends State<SettingsPage> {
       _diagnosing = true;
       _diagnosis = '';
     });
+    // 跑过一次之后长说明就没用了（下面会收起），记下来省点屏幕
+    unawaited(c.markTipSeen(TipKeys.diagnose));
     final text = await c.diagnoseRecognition();
     if (!mounted) return;
     setState(() {
@@ -401,6 +473,7 @@ class _SettingsPageState extends State<SettingsPage> {
   /// 识别诊断：扫描后仍是「未识别」时，用它看清卡在读图、解码还是识别。
   Widget _diagnoseCard() {
     final dark = Theme.of(context).brightness == Brightness.dark;
+    final seen = c.hasSeenTip(TipKeys.diagnose);
     return AppCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -414,10 +487,13 @@ class _SettingsPageState extends State<SettingsPage> {
             ],
           ),
           const SizedBox(height: 6),
-          const Text(
-            '扫描后仍是「未识别」时，点下面用第一条记录跑一遍，'
-            '看清是读图失败、解码失败，还是识别不出金额。结果可直接复制。',
-            style: TextStyle(fontSize: 12, height: 1.55, color: Palette.textDim),
+          // 长说明只看一次：之后收成一行，设置页不再被大段文字占满
+          Text(
+            seen
+                ? '用第一条记录跑一遍，看清卡在读图、解码还是识别。'
+                : '扫描后仍是「未识别」时，点下面用第一条记录跑一遍，'
+                    '看清是读图失败、解码失败，还是识别不出金额。结果可直接复制。',
+            style: const TextStyle(fontSize: 12, height: 1.55, color: Palette.textDim),
           ),
           const SizedBox(height: 10),
           Row(
@@ -489,6 +565,18 @@ class _SettingsPageState extends State<SettingsPage> {
             '识别算法：内置 25px 字形模板匹配（不联网、不上传图片）。'
             '「刷新日期」为 Android 专属功能，用于让 QQ / 相册把旧图当成新图。',
             style: TextStyle(fontSize: 11.5, height: 1.6, color: Palette.textDim),
+          ),
+          const SizedBox(height: 8),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              onPressed: () async {
+                await c.resetTips();
+                c.showToast('已重置，说明会在下次操作时再出现一次');
+              },
+              icon: const Icon(Icons.replay_outlined, size: 16),
+              label: const Text('重新显示所有说明', style: TextStyle(fontSize: 12.5)),
+            ),
           ),
         ],
       ),

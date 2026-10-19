@@ -16,6 +16,11 @@ class WxBillsApp extends StatefulWidget {
 }
 
 class _WxBillsAppState extends State<WxBillsApp> {
+  /// 必须用 key 拿 messenger，不能在 build 方法所在的 context 上
+  /// `ScaffoldMessenger.maybeOf(context)` —— 那个 context 在 MaterialApp **之上**，
+  /// 根本找不到 ScaffoldMessenger，返回 null。之前的写法就是因此让所有
+  /// toast（扫描结果、保存失败、复制成功…）静默失效。
+  final _messengerKey = GlobalKey<ScaffoldMessengerState>();
   int _toastSeq = 0;
 
   @override
@@ -35,15 +40,15 @@ class _WxBillsAppState extends State<WxBillsApp> {
     if (!mounted) return;
     if (c.toastSeq != _toastSeq && c.toast.isNotEmpty) {
       _toastSeq = c.toastSeq;
-      final messenger = ScaffoldMessenger.maybeOf(context);
-      messenger
+      // 只处理提示，不 setState：这一层没有依赖 controller 的界面，
+      // 每来一次通知就整棵树重建一遍纯属浪费（列表自己会重建）。
+      _messengerKey.currentState
         ?..hideCurrentSnackBar()
         ..showSnackBar(SnackBar(
           content: Text(c.toast),
           duration: const Duration(seconds: 3),
         ));
     }
-    setState(() {});
   }
 
   @override
@@ -54,6 +59,7 @@ class _WxBillsAppState extends State<WxBillsApp> {
       theme: buildTheme(Brightness.light),
       darkTheme: buildTheme(Brightness.dark),
       themeMode: ThemeMode.system,
+      scaffoldMessengerKey: _messengerKey,
       home: HomeShell(controller: widget.controller),
     );
   }
@@ -70,9 +76,12 @@ class HomeShell extends StatefulWidget {
 }
 
 class _HomeShellState extends State<HomeShell> {
+  bool _ready = false;
+
   @override
   void initState() {
     super.initState();
+    _ready = widget.controller.ready;
     widget.controller.addListener(_onChanged);
   }
 
@@ -82,8 +91,12 @@ class _HomeShellState extends State<HomeShell> {
     super.dispose();
   }
 
+  /// 这一层只关心「数据是否已就绪」：就绪之后的重建由 BillsPage 自己负责，
+  /// 否则每次扫描进度都会把整个 Scaffold 重建一遍。
   void _onChanged() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    if (_ready == widget.controller.ready) return;
+    setState(() => _ready = widget.controller.ready);
   }
 
   void _openSettings() {
@@ -96,7 +109,7 @@ class _HomeShellState extends State<HomeShell> {
 
   @override
   Widget build(BuildContext context) {
-    if (!widget.controller.ready) {
+    if (!_ready) {
       return const Scaffold(
         body: Center(child: CircularProgressIndicator()),
       );
