@@ -35,7 +35,8 @@ class _SettingsPageState extends State<SettingsPage> {
   void initState() {
     super.initState();
     final cfg = c.store.sync;
-    _url = TextEditingController(text: cfg.url);
+    // 默认就是坚果云：用户只需要补账号和应用密码
+    _url = TextEditingController(text: cfg.url.isEmpty ? kDefaultDavUrl : cfg.url);
     _user = TextEditingController(text: cfg.username);
     _pass = TextEditingController(text: cfg.password);
     _insecure = cfg.allowInsecureTls;
@@ -141,8 +142,11 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           const SizedBox(height: 4),
           const Text(
-            '把收款单记录与缩略图同步到自己的网盘（坚果云 / Nextcloud / Synology 等）。'
-            '两台设备填同一个地址即可互通；冲突按「最后修改时间」合并。',
+            '默认用坚果云，地址已填好，只需要再填账号和「应用密码」：'
+            '坚果云网页版 → 账户信息 → 安全选项 → 添加应用密码（直接用登录密码会 401）。'
+            '也可以换成 Nextcloud / Synology 的 WebDAV 地址。\n'
+            '「测试连接」会真的去读一次目录，目录不存在会自动建出来，'
+            '并把最终路径回显出来——路径通不通，一眼能看到。',
             style: TextStyle(fontSize: 12, height: 1.55, color: Palette.textDim),
           ),
           const SizedBox(height: 14),

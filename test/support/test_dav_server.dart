@@ -26,6 +26,21 @@ class TestDavServer {
   /// 统计各方法的调用次数（验证「已是最新时不重复上传」）。
   final Map<String, int> calls = {};
 
+  /// 按路径统计 PUT / GET 次数（验证「同一份文件不会被重复传输」）。
+  final Map<String, int> putCounts = {};
+  final Map<String, int> getCounts = {};
+
+  int putCount(String path) => putCounts[path] ?? 0;
+  int getCount(String path) => getCounts[path] ?? 0;
+
+  /// 让服务端像坚果云 / 部分 Nextcloud 那样返回弱 ETag（`W/"..."`）。
+  /// 客户端必须按强校验发 If-Match，否则永远 412。
+  bool weakEtags = false;
+
+  /// 严格实现：`If-Match` 里带 `W/` 前缀直接 412（RFC 7232 要求强比较）。
+  /// 客户端如果原样透传弱 ETag，就会永远冲突。
+  bool strictIfMatch = false;
+
   /// 置为非 0 时，接下来 N 次 PUT 会先被「别的设备」抢先写一次，
   /// 用来验证客户端会重新下载 → 重新合并 → 再写。
   int forceConflictOnPut = 0;
@@ -56,6 +71,15 @@ class TestDavServer {
   int callCount(String method) => calls[method] ?? 0;
 
   String _nextEtag() => '"etag-${++_etagSeq}"';
+
+  String _emit(String etag) => weakEtags ? 'W/$etag' : etag;
+
+  /// 比较 ETag 时忽略弱前缀（服务端实现通常也是这么宽容的）。
+  static String _strong(String? etag) {
+    var e = (etag ?? '').trim();
+    if (e.startsWith('W/')) e = e.substring(2).trim();
+    return e;
+  }
 
   Future<void> _handle(HttpRequest request) async {
     final method = request.method.toUpperCase();
@@ -141,7 +165,7 @@ class TestDavServer {
       if (!isDir) {
         sb.write('<D:getcontentlength>${bytes?.length ?? 0}</D:getcontentlength>');
         final etag = etags[e];
-        if (etag != null) sb.write('<D:getetag>$etag</D:getetag>');
+        if (etag != null) sb.write('<D:getetag>${_emit(etag)}</D:getetag>');
       }
       sb.write('<D:getlastmodified>Mon, 19 Oct 2026 04:00:00 GMT</D:getlastmodified>');
       sb.write('</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>');
@@ -158,6 +182,7 @@ class TestDavServer {
       path.split('/').map(Uri.encodeComponent).join('/');
 
   Future<void> _get(HttpRequest request, String path) async {
+    getCounts[path] = (getCounts[path] ?? 0) + 1;
     final bytes = files[path];
     if (bytes == null) {
       request.response.statusCode = files.containsKey(path) ? 405 : 404;
@@ -165,7 +190,9 @@ class TestDavServer {
       return;
     }
     final etag = etags[path];
-    if (etag != null) request.response.headers.set(HttpHeaders.etagHeader, etag);
+    if (etag != null) {
+      request.response.headers.set(HttpHeaders.etagHeader, _emit(etag));
+    }
     request.response.headers.contentType = ContentType('application', 'json');
     request.response.add(bytes);
     await request.response.close();
@@ -183,6 +210,7 @@ class TestDavServer {
   }
 
   Future<void> _put(HttpRequest request, String path) async {
+    putCounts[path] = (putCounts[path] ?? 0) + 1;
     final body = await _readAll(request);
 
     // 模拟「另一台设备刚好先写了」：本次请求必然拿到 412
@@ -206,7 +234,10 @@ class TestDavServer {
         return;
       }
     } else if (ifMatch != null && ifMatch.isNotEmpty) {
-      if (current == null || ifMatch != current) {
+      final weak = ifMatch.trim().startsWith('W/');
+      if (current == null ||
+          weak && strictIfMatch ||
+          _strong(ifMatch) != _strong(current)) {
         request.response.statusCode = 412;
         await request.response.close();
         return;
@@ -216,7 +247,7 @@ class TestDavServer {
     files[path] = body;
     final etag = _nextEtag();
     etags[path] = etag;
-    request.response.headers.set(HttpHeaders.etagHeader, etag);
+    request.response.headers.set(HttpHeaders.etagHeader, _emit(etag));
     request.response.statusCode = current == null ? 201 : 204;
     await request.response.close();
   }

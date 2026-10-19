@@ -52,6 +52,12 @@ class SourceFolder {
       );
 }
 
+/// 默认的 WebDAV 地址（坚果云）。
+///
+/// 选它当默认值是因为国内最省事：注册即用、支持「应用密码」、支持标准 WebDAV，
+/// 不需要自建 NAS。地址末尾的 `wxbills` 是应用自己的目录，首次同步会自动创建。
+const String kDefaultDavUrl = 'https://dav.jianguoyun.com/dav/wxbills';
+
 /// WebDAV 同步配置。
 class SyncConfig {
   const SyncConfig({
@@ -358,6 +364,19 @@ class BillStore {
     final f = dirs.thumbFile(name);
     if (!await f.exists()) return null;
     return f.readAsBytes();
+  }
+
+  /// 缩略图字节数；没有这个文件返回 null。
+  ///
+  /// 同步时先用它判断要不要读整份字节——否则每次同步都要把几百张缩略图读进内存，
+  /// 只为了比较大小。
+  Future<int?> thumbLength(String name) async {
+    if (name.isEmpty) return null;
+    try {
+      return await dirs.thumbFile(name).length();
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<void> writeThumb(String name, List<int> bytes) async {

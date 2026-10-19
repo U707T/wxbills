@@ -162,7 +162,8 @@ class WebDavClient {
     String contentType = 'application/json; charset=utf-8',
   }) async {
     final headers = <String, String>{'Content-Type': contentType};
-    if (ifMatch.isNotEmpty) headers[HttpHeaders.ifMatchHeader] = ifMatch;
+    final strong = strongEtag(ifMatch);
+    if (strong.isNotEmpty) headers[HttpHeaders.ifMatchHeader] = strong;
     if (createOnly) headers[HttpHeaders.ifNoneMatchHeader] = '*';
     final r = await _send('PUT', url, headers: headers, body: bytes);
     if (r.status == 412) {
@@ -189,6 +190,15 @@ class WebDavClient {
   }
 
   String ensureTrailingSlash(String url) => url.endsWith('/') ? url : '$url/';
+
+  /// 去掉弱校验前缀：RFC 7232 规定 `If-Match` 必须用强比较，直接把服务端返回的
+  /// `W/"abc"` 当条件发出去，规范实现会一律回 412 —— 表现就是「同步永远冲突」。
+  /// 坚果云 / 部分 Nextcloud 的 PROPFIND 就会给弱 ETag，这里统一按强校验使用。
+  static String strongEtag(String etag) {
+    var e = etag.trim();
+    if (e.startsWith('W/')) e = e.substring(2).trim();
+    return e;
+  }
 
   String fileNameOf(String url) {
     final trimmed = url.replaceAll(RegExp(r'/+$'), '');

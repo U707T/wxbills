@@ -97,7 +97,13 @@ class SyncEngine {
       onProgress?.call(const SyncProgress('连接服务器…', 0, 1));
       final snapshotUrl = '${client.root}/$snapshotName';
       final dirUrl = '${client.root}/';
-      await client.ensureDir(dirUrl);
+      // 先读一次目录：存在就不再 MKCOL（省两次无意义的写请求），顺便早一步发现 401
+      try {
+        await client.list(dirUrl);
+      } on WebDavException catch (e) {
+        if (e.status != 404) rethrow;
+        await client.ensureDir(dirUrl);
+      }
 
       // ---------------------------------------------------------- 1. 下载 + 合并
       onProgress?.call(const SyncProgress('下载远端数据…', 0, 1));
@@ -226,21 +232,53 @@ class SyncEngine {
     }
   }
 
-  /// 只测试连接：列一次目录并读一次快照头，不修改任何数据。
+  /// 测试连接 = **验证路径真的可用**：能读目录，不存在就建出来再读一次。
+  ///
+  /// 只做一次 PROPFIND 的话，坚果云上填了一个还没创建的目录会直接报 404，
+  /// 用户会以为地址错了。这里把「不存在」当成待创建，创建后再确认可读，
+  /// 并把最终绝对路径回显出来——路径到底通不通，一眼能看到。
   Future<String> testConnection() async {
     final client = _client();
+    final dirUrl = '${client.root}/';
     try {
-      final entries = await client.list('${client.root}/');
-      final hasSnapshot =
-          entries.any((e) => !e.isDirectory && e.name == snapshotName);
-      final count = entries.where((e) => !e.isDirectory).length;
+      List<DavEntry>? entries;
+      try {
+        entries = await client.list(dirUrl);
+      } on WebDavException catch (e) {
+        if (e.status != 404) rethrow;
+        await client.ensureDir(dirUrl);
+        entries = await client.list(dirUrl);
+      }
+      final files = entries.where((e) => !e.isDirectory).toList();
+      final hasSnapshot = files.any((e) => e.name == snapshotName);
+      final where = '路径：${client.root}/';
       return hasSnapshot
-          ? '连接成功：已找到远端快照，共 $count 个文件'
-          : '连接成功：远端目录为空，首次同步会上传本机数据';
+          ? '连接成功，路径可用。$where（已有远端快照，共 ${files.length} 个文件）'
+          : '连接成功，路径可用。$where（远端为空，首次同步会上传本机数据）';
     } on WebDavException catch (e) {
-      return '连接失败：${e.message}';
+      return _friendlyError(e, client.root);
     } finally {
       client.close();
+    }
+  }
+
+  /// 把状态码翻译成用户能照着做的提示（坚果云是最常见的配置场景）。
+  static String _friendlyError(WebDavException e, String root) {
+    switch (e.status) {
+      case 401:
+        return '连接失败：账号或密码不对。坚果云要在「账户信息 → 安全选项 → 添加应用密码」'
+            '生成一个专用密码，填到「密码」里——直接用登录密码会一直 401。';
+      case 403:
+        return '连接失败：这个账号没有写入 $root 的权限（HTTP 403）。';
+      case 404:
+        return '连接失败：路径不存在且创建失败（HTTP 404）：$root';
+      case 409:
+        return '连接失败：上级目录不存在（HTTP 409）。检查地址里的层级，'
+            '坚果云的 WebDAV 根是 https://dav.jianguoyun.com/dav/';
+      case 507:
+        return '连接失败：网盘空间不足（HTTP 507）。';
+      default:
+        return '连接失败：${e.message}';
     }
   }
 
@@ -256,13 +294,20 @@ class SyncEngine {
     if (withThumb.isEmpty) return (0, 0);
 
     final base = '${client.root}/$thumbsDirName';
-    await client.ensureDir(base);
     final remote = <String, DavEntry>{};
     try {
       for (final e in await client.list('$base/')) {
         if (!e.isDirectory) remote[e.name] = e;
       }
-    } on WebDavException {
+    } on WebDavException catch (e) {
+      if (e.status == 404) {
+        // 目录还不存在：建一次即可，已存在时 MKCOL 返回 405 会被忽略
+        try {
+          await client.ensureDir(base);
+        } on WebDavException {
+          // 建不出来就让下面的逐张上传各自报错，不阻断整个同步
+        }
+      }
       // 列目录失败就当远端全空，逐个补传即可
     }
 
@@ -271,11 +316,13 @@ class SyncEngine {
     for (var i = 0; i < withThumb.length; i++) {
       final b = withThumb[i];
       onProgress?.call(SyncProgress('同步缩略图…', i + 1, withThumb.length));
-      final local = await store.readThumb(b.thumb);
       final remoteEntry = remote[b.thumb];
-      if (local == null) {
+      // 先只取本地文件长度：内容没变时不必把几百张缩略图读进内存
+      final localLength = await store.thumbLength(b.thumb);
+      if (localLength == null) {
         if (remoteEntry == null) continue;
-        // 本机没有（例如刚从另一台设备同步来的记录）：下载下来才能显示
+        // 本机没有（例如刚从另一台设备同步来的记录）：下载下来才能显示。
+        // 本地已经有了就不会再下载——重复同步不该重复拉同一张图。
         try {
           final got = await client.get(remoteEntry.url);
           final bytes = got.bytes;
@@ -291,9 +338,12 @@ class SyncEngine {
         // `<id>.jpg`，「重新识别全部」换了内容后只有靠长度才能发现不一致）。
         // 服务端没给 content-length（size < 0）时无法判断，宁可不动，避免每轮都写。
         final missing = remoteEntry == null;
-        final changed =
-            remoteEntry != null && remoteEntry.size >= 0 && remoteEntry.size != local.length;
+        final changed = remoteEntry != null &&
+            remoteEntry.size >= 0 &&
+            remoteEntry.size != localLength;
         if (!missing && !changed) continue;
+        final local = await store.readThumb(b.thumb);
+        if (local == null) continue;
         try {
           await client.put(
             '$base/${WebDavClient.encodeSegment(b.thumb)}',

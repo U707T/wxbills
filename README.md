@@ -68,7 +68,7 @@
 export PATH=/opt/flutter/bin:$PATH
 flutter pub get
 flutter analyze
-flutter test                      # 59 项：OCR 回归 / 同步端到端 / 存储 / 扫描 / UI / 回归
+flutter test                      # 66 项：OCR 回归 / 同步端到端 / 存储 / 扫描 / UI / 回归
 flutter build apk --debug --target-platform=android-arm64
 ```
 
@@ -80,6 +80,7 @@ flutter build apk --debug --target-platform=android-arm64
 | `test/ocr_layout_test.dart` | 金额不在固定高度（状态栏 / 长截图）也要认得出；PNG 字节自解码与桌面路径一致 |
 | `test/recognition_retry_test.dart` | 未识别记录会重试、静默扫描不重试、手工金额不被覆盖 |
 | `test/sync_test.dart` | 首次上传 / 拉取 / 双向修改 / 删除同步 / ETag 冲突重试 / 401 / 500 / 远端损坏 / 缩略图 |
+| `test/sync_nutstore_test.dart` | 坚果云式路径（子目录自建）/ 重复同步 0 PUT / 缩略图只下载一次 / 弱 ETag 不 412 / 测试连接回显路径 |
 | `test/store_test.dart` | 金额格式化、合并交换律、原子写、坏文件恢复、墓碑清理 |
 | `test/scanner_test.dart` | 增量扫描、手工金额不被覆盖、删除留墓碑、跨设备记录不误删 |
 | `test/regression_test.dart` | 列目录失败不误删、删后重扫不复活、并发落盘、定位屏外记录、删除优先合并 |
