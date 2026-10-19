@@ -67,7 +67,7 @@
 export PATH=/opt/flutter/bin:$PATH
 flutter pub get
 flutter analyze
-flutter test                      # 56 项：OCR 回归 / 同步端到端 / 存储 / 扫描 / UI / 回归
+flutter test                      # 58 项：OCR 回归 / 同步端到端 / 存储 / 扫描 / UI / 回归
 flutter build apk --debug --target-platform=android-arm64
 ```
 
@@ -76,7 +76,7 @@ flutter build apk --debug --target-platform=android-arm64
 | 测试文件 | 覆盖内容 |
 |---------|---------|
 | `test/amount_reader_test.dart` | 18 张真实收款单 + 50% 缩图 + 空白图 |
-| `test/ocr_layout_test.dart` | 金额不在固定高度（状态栏 / 长截图）也要认得出 |
+| `test/ocr_layout_test.dart` | 金额不在固定高度（状态栏 / 长截图）也要认得出；PNG 字节自解码与桌面路径一致 |
 | `test/recognition_retry_test.dart` | 未识别记录会重试、静默扫描不重试、手工金额不被覆盖 |
 | `test/sync_test.dart` | 首次上传 / 拉取 / 双向修改 / 删除同步 / ETag 冲突重试 / 401 / 500 / 远端损坏 / 缩略图 |
 | `test/store_test.dart` | 金额格式化、合并交换律、原子写、坏文件恢复、墓碑清理 |

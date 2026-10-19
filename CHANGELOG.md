@@ -1,5 +1,22 @@
 # 更新日志
 
+## v2.0.3
+
+### 修复
+- **Android 读图改成双路线**：以前只依赖原生 `readImage`（BitmapFactory 下采样解码），
+  它一旦返回 null / 抛异常，Dart 侧就静默当成「认不出金额」，整本账显示「未识别」且没有任何线索。
+  现在 A 路线失败会自动退到 B 路线（原生只回原始字节，Dart 用 `image` 包自己解码）；
+  两条都失败时把原因（`decode_failed` / `read_failed` + 消息）留在 `PhotoSource.loadError` 里。
+  顺带把桌面与 Android 解码收敛到同一个 `decodeBytesForOcr`。
+- **设置页新增「识别诊断」**：用第一条记录跑一遍「读图 → 解码 → 识别」，逐段报告
+  平台 / 目录 / 最近一次扫描结果 / 读图尺寸 / 识别文本与置信度 / 缩略图字节数，
+  失败时带上具体原因，可一键复制。以后「未识别」不用再靠猜。
+
+### 测试
+- `test/ocr_layout_test.dart` 增加「PNG 字节 → decodeBytesForOcr → 识别」一致性测试（等于 Android B 路线）
+- `test/regression_test.dart` 增加识别诊断的失败/成功两条路径
+- 全量 56 → 58 项
+
 ## v2.0.2
 
 ### 修复
