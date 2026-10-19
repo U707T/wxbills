@@ -1,7 +1,7 @@
 name: wxbills
 description: "收款单管理：识别微信收款单金额、按金额排序定位，Android / Windows 双端，支持 WebDAV 同步。"
 publish_to: 'none'
-version: 2.0.3+8
+version: 2.1.0+9
 
 environment:
   sdk: ^3.13.4

@@ -256,6 +256,20 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  /// 复制这张图的原始文件到系统剪贴板（桌面端顶替「刷新日期」）。
+  Future<void> copyImage(Bill bill) async {
+    if (!source.supportsCopyImage) {
+      showToast('当前平台不支持复制图片');
+      return;
+    }
+    if (bill.path.isEmpty) {
+      showToast('这条记录没有本机原图（可能是从其他设备同步来的）');
+      return;
+    }
+    final ok = await source.copyImage(bill.path);
+    showToast(ok ? '已复制图片，可直接粘贴到聊天窗口' : '复制失败：原图可能已被移动或删除');
+  }
+
   // ---------------------------------------------------------------- 目录
 
   Future<void> addFolder() async {

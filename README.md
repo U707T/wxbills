@@ -38,6 +38,7 @@
 | 图片来源 | SAF 授权目录（`content://`） | 本地文件夹路径 |
 | 金额识别 | 原生下采样 → Dart 模板匹配 | `image` 包解码 → 同一套匹配 |
 | 缩略图 | 系统缩略图（最快） | 解码后缩放 |
+| 行内快捷操作 | 刷新图片日期 | **复制图片**（原文件进剪贴板） |
 | 刷新图片日期 | ✅ | ❌（桌面没有「相册入库时间」概念） |
 | WebDAV 同步 | ✅ | ✅ |
 
@@ -67,7 +68,7 @@
 export PATH=/opt/flutter/bin:$PATH
 flutter pub get
 flutter analyze
-flutter test                      # 58 项：OCR 回归 / 同步端到端 / 存储 / 扫描 / UI / 回归
+flutter test                      # 59 项：OCR 回归 / 同步端到端 / 存储 / 扫描 / UI / 回归
 flutter build apk --debug --target-platform=android-arm64
 ```
 

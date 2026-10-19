@@ -21,8 +21,21 @@ class FakeSource implements PhotoSource {
   bool throwOnList;
   bool accessible = true;
 
+  /// 桌面端能力：行内按钮会换成「复制图片」
+  bool copyable = false;
+  final List<String> copied = [];
+
   @override
   bool get supportsRefreshDate => false;
+
+  @override
+  bool get supportsCopyImage => copyable;
+
+  @override
+  Future<bool> copyImage(String path) async {
+    copied.add(path);
+    return copyable;
+  }
 
   @override
   String get loadError => '';
@@ -270,6 +283,35 @@ void main() {
 
     await tmp.delete(recursive: true);
   });
+  testWidgets('桌面端行内按钮是「复制图片」，点击后真的走复制', (tester) async {
+    late Directory tmp;
+    late AppController controller;
+    late FakeSource source;
+    await tester.runAsync(() async {
+      tmp = await Directory.systemTemp.createTemp('wxbills_copy');
+      final dirs = AppDirs(tmp);
+      await dirs.ensure();
+      final store = BillStore(dirs);
+      await store.load();
+      source = FakeSource(paths: ['/album/a.png'])..copyable = true;
+      store.addFolder('/album', 'album');
+      controller = AppController(dirs: dirs, store: store, source: source);
+      await controller.init();
+    });
+    await tester.pumpWidget(WxBillsApp(controller: controller));
+    await tester.pumpAndSettle();
+
+    // 桌面端：没有「刷新日期」，取而代之是「复制图片」
+    expect(find.byIcon(Icons.content_copy_rounded), findsOneWidget);
+    expect(find.byIcon(Icons.refresh_rounded), findsNothing);
+
+    await tester.tap(find.byIcon(Icons.content_copy_rounded));
+    await tester.pumpAndSettle();
+
+    expect(source.copied, ['/album/a.png'], reason: '点按钮要把这条记录的原图交给剪贴板');
+    await tester.pump(const Duration(seconds: 4));
+    await tester.runAsync(() => tmp.delete(recursive: true));
+  });
 }
 
 /// 诊断测试用：可切换「读图失败 / 成功」并带错误原因。
@@ -279,6 +321,12 @@ class _DiagnoseSource implements PhotoSource {
 
   @override
   bool get supportsRefreshDate => false;
+
+  @override
+  bool get supportsCopyImage => false;
+
+  @override
+  Future<bool> copyImage(String path) async => false;
 
   @override
   String get loadError => error;

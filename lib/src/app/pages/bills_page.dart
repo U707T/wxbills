@@ -225,6 +225,7 @@ class _BillsPageState extends State<BillsPage> {
                           controller: c,
                           onEdit: () => _editBill(b),
                           onRefresh: () => _confirmRefresh([b]),
+                          onCopy: () => c.copyImage(b),
                           onDelete: () => _deleteBill(b),
                         ),
                       );

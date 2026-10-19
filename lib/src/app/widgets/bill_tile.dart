@@ -17,6 +17,7 @@ class BillTile extends StatelessWidget {
     required this.controller,
     required this.onEdit,
     required this.onRefresh,
+    required this.onCopy,
     required this.onDelete,
   });
 
@@ -25,6 +26,9 @@ class BillTile extends StatelessWidget {
   final AppController controller;
   final VoidCallback onEdit;
   final VoidCallback onRefresh;
+
+  /// 复制这张图到剪贴板（桌面端用它顶替 Android 的「刷新日期」）。
+  final VoidCallback onCopy;
   final VoidCallback onDelete;
 
   @override
@@ -97,6 +101,18 @@ class BillTile extends StatelessWidget {
               onPressed: onRefresh,
               tooltip: '刷新这张图片的日期（让 QQ/相册当成新图）',
               icon: const Icon(Icons.refresh_rounded, size: 18),
+              style: IconButton.styleFrom(
+                backgroundColor: dark ? const Color(0xFF262A2C) : Palette.greenSoft,
+                foregroundColor: Palette.green,
+                minimumSize: const Size(34, 34),
+                padding: EdgeInsets.zero,
+              ),
+            )
+          else if (controller.source.supportsCopyImage)
+            IconButton(
+              onPressed: onCopy,
+              tooltip: '复制图片（可直接粘贴到聊天窗口）',
+              icon: const Icon(Icons.content_copy_rounded, size: 17),
               style: IconButton.styleFrom(
                 backgroundColor: dark ? const Color(0xFF262A2C) : Palette.greenSoft,
                 foregroundColor: Palette.green,

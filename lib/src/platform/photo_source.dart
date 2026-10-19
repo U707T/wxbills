@@ -6,6 +6,8 @@ import 'package:image/image.dart' as img;
 import 'package:saf_util/saf_util.dart';
 import 'package:saf_util/saf_util_platform_interface.dart';
 
+import 'windows_clipboard.dart';
+
 /// 一张图片的「本机定位信息」。
 class PhotoRef {
   const PhotoRef({
@@ -45,6 +47,15 @@ class OcrImage {
 abstract class PhotoSource {
   /// 是否支持「刷新图片入库时间」（让 QQ / 相册把旧图当新图）。
   bool get supportsRefreshDate;
+
+  /// 是否支持把图片复制到剪贴板。
+  ///
+  /// 桌面端拿它顶替 Android 的「刷新日期」：PC 上没有「相册入库时间」这回事，
+  /// 但「复制这张图，粘到聊天窗口里发出去」是每天都会用到的动作。
+  bool get supportsCopyImage;
+
+  /// 把图片放进系统剪贴板。失败返回 false。
+  Future<bool> copyImage(String path);
 
   /// 最后一次读图失败的原因（成功时为空）。界面「识别诊断」会显示它，
   /// 不再把「图都读不出来」和「认不出金额」混成同一个「未识别」。
@@ -148,6 +159,14 @@ class AndroidPhotoSource implements PhotoSource {
 
   @override
   bool get supportsRefreshDate => true;
+
+  // Android 侧还没有做「复制图片」（需要 FileProvider + ClipData），
+  // 行内按钮继续用「刷新日期」。
+  @override
+  bool get supportsCopyImage => false;
+
+  @override
+  Future<bool> copyImage(String path) async => false;
 
   @override
   Future<({String path, String name})?> pickFolder() async {
@@ -326,6 +345,12 @@ class DesktopPhotoSource implements PhotoSource {
 
   @override
   bool get supportsRefreshDate => false;
+
+  @override
+  bool get supportsCopyImage => true;
+
+  @override
+  Future<bool> copyImage(String path) async => WindowsClipboard.copyFile(path);
 
   @override
   Future<({String path, String name})?> pickFolder() async {
