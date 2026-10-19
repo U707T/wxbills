@@ -245,10 +245,10 @@ void main() {
     await dirsA.root.delete(recursive: true);
   });
 
-  test('允许写文件但拒绝建目录：记录照样同步，缩略图失败要看得见', () async {
+  test('允许写文件但拒绝建目录：缩略图自动改成与记录同目录', () async {
     server.refuseMkcol = true;
     final (dirsA, a) = await newDevice('a');
-    a.setSync(cfgFor(server, sub: '')); // 直接写网盘根
+    a.setSync(cfgFor(server, sub: '')); // 直接写网盘根，没有子目录可建
     await a.writeThumb('t1.jpg', [1, 2, 3]);
     a.put(makeBill(id: 'x', updatedAt: 1000, thumb: 't1.jpg'));
     await a.save();
@@ -256,11 +256,19 @@ void main() {
     final r = await SyncEngine(a).run();
     expect(r.ok, isTrue, reason: r.message);
     expect(server.getFile('/dav/bills.json'), isNotNull,
-        reason: '不该因为「建目录被拒」就整套同步失败：先直接写文件');
-    expect(r.message, contains('缩略图目录创建失败'),
-        reason: '缩略图没同步要写在汇总里，不能静默：${r.message}');
-    expect(a.byId('x')!.amountCents, 1000);
+        reason: '记录不该因为「建目录被拒」而同步不了');
+    expect(server.getFile('/dav/thumb_t1.jpg'), isNotNull,
+        reason: '缩略图要退化到与快照同目录（加 thumb_ 前缀）');
+    expect(r.message, contains('缩略图与记录同目录'), reason: r.message);
+
+    // 另一台设备也必须能在同一个位置找到它（否则图永远同步不过去）
+    final (dirsB, b) = await newDevice('b');
+    b.setSync(cfgFor(server, sub: ''));
+    expect((await SyncEngine(b).run()).ok, isTrue);
+    expect(await b.readThumb('t1.jpg'), [1, 2, 3],
+        reason: '退化模式下另一台设备也要能下到缩略图');
 
     await dirsA.root.delete(recursive: true);
+    await dirsB.root.delete(recursive: true);
   });
 }

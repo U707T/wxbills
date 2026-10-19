@@ -220,7 +220,7 @@ class SyncEngine {
 
         final now = DateTime.now().millisecondsSinceEpoch;
         final summary = _summary(pushed, pulled, thumbStats.$1, thumbStats.$2,
-            thumbsDirFailed: thumbsDirMissing);
+            thumbsDirFlat: thumbsAreFlat);
         store.recordSync(now, summary);
         await store.save();
         onProgress?.call(SyncProgress('完成', 1, 1, message: summary));
@@ -341,8 +341,12 @@ class SyncEngine {
   // ---------------------------------------------------------------- 缩略图
 
   /// 返回（上传数, 下载数）。
-  /// 本次同步中「缩略图目录建不出来」——记录照样同步，但汇总里要说清楚。
-  bool thumbsDirMissing = false;
+  /// 这个网盘不允许建子目录（坚果云就是这样）：缩略图退化到与快照同目录，
+  /// 文件名加 `thumb_` 前缀。每轮同步重新判断一次，不落盘。
+  bool thumbsAreFlat = false;
+
+  /// 退化模式下的文件名前缀。
+  static const String _flatPrefix = 'thumb_';
 
   Future<(int, int)> _syncThumbs(
     WebDavClient client,
@@ -354,21 +358,38 @@ class SyncEngine {
 
     final base = '${client.root}/$thumbsDirName';
     final remote = <String, DavEntry>{};
+    var flat = false;
     try {
       for (final e in await client.list('$base/')) {
         if (!e.isDirectory) remote[e.name] = e;
       }
     } on WebDavException catch (e) {
       if (e.status == 404) {
-        // 目录还不存在：建一次即可，已存在时 MKCOL 返回 405 会被忽略
+        // 目录还不存在：建一次。建不出来就退化——有些网盘（坚果云）
+        // 允许直接写文件，但 MKCOL 被拒；此时把缩略图放到快照同目录，
+        // 文件名加 thumb_ 前缀，功能不受影响。
+        var created = true;
         try {
           await client.ensureDir(base);
         } on WebDavException {
-          // 建不出来不阻断记录同步，但要让用户看到（汇总里会写）
-          thumbsDirMissing = true;
+          created = false;
+        }
+        if (!created) {
+          flat = true;
+          thumbsAreFlat = true;
+          try {
+            for (final e in await client.list('${client.root}/')) {
+              if (e.isDirectory) continue;
+              if (e.name.startsWith(_flatPrefix)) {
+                remote[e.name.substring(_flatPrefix.length)] = e;
+              }
+            }
+          } on WebDavException {
+            // 列不出根目录就当远端全空，逐张补传即可
+          }
         }
       }
-      // 列目录失败就当远端全空，逐个补传即可
+      // 其他错误：当远端全空，逐个补传
     }
 
     var up = 0;
@@ -404,12 +425,11 @@ class SyncEngine {
         if (!missing && !changed) continue;
         final local = await store.readThumb(b.thumb);
         if (local == null) continue;
+        final target = flat
+            ? '${client.root}/$_flatPrefix${WebDavClient.encodeSegment(b.thumb)}'
+            : '$base/${WebDavClient.encodeSegment(b.thumb)}';
         try {
-          await client.put(
-            '$base/${WebDavClient.encodeSegment(b.thumb)}',
-            local,
-            contentType: 'image/jpeg',
-          );
+          await client.put(target, local, contentType: 'image/jpeg');
           up++;
         } on WebDavException {
           // 忽略单张失败
@@ -466,13 +486,13 @@ class SyncEngine {
       a.updatedAt == b.updatedAt;
 
   static String _summary(int pushed, int pulled, int up, int down,
-      {bool thumbsDirFailed = false}) {
+      {bool thumbsDirFlat = false}) {
     final parts = <String>[];
     if (pushed > 0) parts.add('上传 $pushed 条');
     if (pulled > 0) parts.add('拉取 $pulled 条');
     if (up > 0) parts.add('上传缩略图 $up 张');
     if (down > 0) parts.add('下载缩略图 $down 张');
-    if (thumbsDirFailed) parts.add('缩略图目录创建失败，本次只同步了记录');
+    if (thumbsDirFlat) parts.add('缩略图与记录同目录（该网盘不能建子目录）');
     return parts.isEmpty ? '已是最新，无需同步' : '同步完成：${parts.join('，')}';
   }
 }
