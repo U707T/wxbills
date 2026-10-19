@@ -146,6 +146,10 @@ class BillStore {
       .where((b) => !b.deleted)
       .fold(0, (s, b) => s + (b.amountCents ?? 0));
 
+  /// 还没识别出金额的条数（界面用来提示「要不要重新识别」）。
+  int get unrecognizedCount =>
+      _bills.values.where((b) => !b.deleted && b.amountCents == null).length;
+
   /// 需要人工核对的条数。
   int get reviewCount => _bills.values.where((b) => !b.deleted && b.needsReview).length;
 

@@ -292,6 +292,8 @@ class AppController extends ChangeNotifier {
     try {
       final result = await scanner.scanAll(
         forceRecheck: force,
+        // 启动时的静默扫描只做增量；用户主动点「扫描识别」时才重试未识别记录
+        retryUnrecognized: !silent,
         onProgress: (p) {
           if (p.total > 0) {
             _setBusy(true, '识别 ${p.done}/${p.total} · ${p.currentName}',
@@ -361,9 +363,12 @@ class AppController extends ChangeNotifier {
     _cancelRequested = false;
     _refreshing = true;
     _setBusy(true, '正在刷新日期…', 0);
+    // 整段包在 try/finally 里：中间任何一步抛异常都不能把 _busy 留在 true
+    // （那会让「扫描识别」按钮永久变灰、点了没反应）。
     var ok = 0;
     var fail = 0;
     final failures = <String>[];
+    try {
     for (var i = 0; i < list.length; i++) {
       if (_cancelRequested) break;
       final b = list[i];
@@ -394,14 +399,18 @@ class AppController extends ChangeNotifier {
       if (i % 10 == 9) await store.save();
       _setBusy(true, '刷新 ${i + 1}/${list.length}', (i + 1) / list.length);
     }
-    _refreshing = false;
-    await store.save();
-    _setBusy(false, '', 0);
-    notifyListeners();
-    final stopped = _cancelRequested && ok + fail < list.length;
-    final detail = failures.isEmpty ? '' : '（${failures.join('；')}）';
-    showToast('已刷新 $ok 张${fail > 0 ? '，$fail 张失败' : ''}'
-        '${stopped ? '，已停止' : ''}$detail');
+    } catch (e) {
+      showToast('刷新中断：$e');
+    } finally {
+      _refreshing = false;
+      await store.save();
+      _setBusy(false, '', 0);
+      notifyListeners();
+      final stopped = _cancelRequested && ok + fail < list.length;
+      final detail = failures.isEmpty ? '' : '（${failures.join('；')}）';
+      showToast('已刷新 $ok 张${fail > 0 ? '，$fail 张失败' : ''}'
+          '${stopped ? '，已停止' : ''}$detail');
+    }
   }
 
   // ---------------------------------------------------------------- 同步

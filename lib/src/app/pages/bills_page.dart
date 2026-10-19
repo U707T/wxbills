@@ -166,8 +166,14 @@ class _BillsPageState extends State<BillsPage> {
         GreenHeader(
           title: '收款单管理',
           subtitle: '共 ${c.totalCount} 张 · 合计 ¥${Bill.formatCents(c.totalSumCents)}'
+              '${c.store.unrecognizedCount > 0 ? ' · ${c.store.unrecognizedCount} 张未识别' : ''}'
               '${c.store.reviewCount > 0 ? ' · ${c.store.reviewCount} 张待核对' : ''}',
           actions: [
+            HeaderIconButton(
+              icon: Icons.restart_alt,
+              tooltip: '重新识别全部（含之前没识别出来的）',
+              onPressed: () => c.scan(force: true),
+            ),
             HeaderIconButton(
               icon: Icons.sync_rounded,
               tooltip: '立即同步（WebDAV）',

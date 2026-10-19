@@ -43,14 +43,18 @@ class AmountReader {
   // ---------------------------------------------------------------- 主流程
 
   static AmountResult _readBody(Uint8List px, int w, int h) {
-    final y0 = (h * 0.15).toInt();
-    final y1 = (h * 0.30).toInt();
+    // 搜索窗口刻意开得比「金额实际所在的位置」宽：
+    // 以前固定取 15%~30% 高度，一旦截图带状态栏、或来自长截图（顶部多出一大块），
+    // 金额就整片落在窗外——表现是「所有图都未识别」。现在只用一个宽松窗口
+    // 圈出候选行带，真正的挑选靠下面的「字号 + 置信度」排序。
+    final y0 = (h * 0.06).toInt();
+    final y1 = (h * 0.56).toInt();
     final x0 = (w * 0.08).toInt();
     final x1 = (w * 0.92).toInt();
     final rw = x1 - x0;
     if (rw <= 8 || y1 <= y0) return AmountResult.empty;
 
-    // 1) 逐行统计暗像素
+    // 1) 逐行统计暗像素（一次算完，所有候选带共用）
     final rowInk = Int32List(h);
     for (var y = y0; y < y1; y++) {
       var c = 0;
@@ -62,9 +66,8 @@ class AmountReader {
       rowInk[y] = c;
     }
 
-    // 2) 行连通带里取最高的一条
-    var bestTop = -1;
-    var bestBot = -1;
+    // 2) 收集所有连通的行带
+    final bands = <int>[]; // 成对存放：top, bottom
     var start = -1;
     var prev = -1;
     for (var y = y0; y < y1; y++) {
@@ -72,23 +75,59 @@ class AmountReader {
         if (start < 0) start = y;
         prev = y;
       } else if (start >= 0) {
-        if (prev - start > bestBot - bestTop) {
-          bestTop = start;
-          bestBot = prev;
-        }
+        bands
+          ..add(start)
+          ..add(prev);
         start = -1;
       }
     }
-    if (start >= 0 && prev - start > bestBot - bestTop) {
-      bestTop = start;
-      bestBot = prev;
+    if (start >= 0) {
+      bands
+        ..add(start)
+        ..add(prev);
     }
-    if (bestTop < 0) return AmountResult.empty;
+    if (bands.isEmpty) return AmountResult.empty;
 
+    // 3) 候选按行带高度从高到低排（金额是收款单上字号最大的一行），
+    //    逐个解码，取「像金额 + 置信度高 + 字号大」的那个。
+    final order = <int>[];
+    for (var i = 0; i < bands.length; i += 2) {
+      final gh = bands[i + 1] - bands[i] + 1;
+      if (gh < h * 0.02) continue; // 噪点行
+      order.add(i);
+    }
+    order.sort((a, b) =>
+        (bands[b + 1] - bands[b]).compareTo(bands[a + 1] - bands[a]));
+
+    AmountResult? best;
+    var bestScore = -1.0;
+    for (final i in order.take(8)) {
+      final top = bands[i];
+      final bot = bands[i + 1];
+      final r = _decodeBand(px, w, x0, rw, top, bot);
+      final text = r.text;
+      if (text == null) continue;
+      // 只有形状像金额的候选才有资格被选中，避免把备注/日期行当成金额
+      if (!_amountShape.hasMatch(text)) continue;
+      final gh = bot - top + 1;
+      final score = r.confidence + gh / h;
+      if (score > bestScore) {
+        bestScore = score;
+        best = r;
+      }
+    }
+    return best ?? AmountResult.empty;
+  }
+
+  /// 识别结果必须是「1~7 位整数 + 可选 1~2 位小数」才当作金额。
+  static final RegExp _amountShape = RegExp(r'^\d{1,7}(\.\d{1,2})?$');
+
+  /// 在 [top]~[bot] 这条行带里切字符块并逐个解码。
+  static AmountResult _decodeBand(
+      Uint8List px, int w, int x0, int rw, int bestTop, int bestBot) {
     final gh = bestBot - bestTop + 1;
-    if (gh < h * 0.02) return AmountResult.empty;
 
-    // 3) 列投影切块
+    // 列投影切块
     final colInk = Int32List(rw);
     for (var x = 0; x < rw; x++) {
       var c = 0;
@@ -123,7 +162,7 @@ class AmountReader {
     }
     if (starts.length < 2) return AmountResult.empty;
 
-    // 4) 跳过开头的 ¥，逐块解码
+    // 跳过开头的 ¥，逐块解码
     final digitW = gh * 0.72;
     final sb = StringBuffer();
     var minConf = 1.0;
@@ -161,9 +200,13 @@ class AmountReader {
 
     final text = sb.toString();
     if (text.isEmpty) return AmountResult.empty;
-    final value = double.tryParse(
-        text.endsWith('.') ? text.substring(0, text.length - 1) : text);
-    return AmountResult(text: text, confidence: minConf, value: value);
+    final trimmed =
+        text.endsWith('.') ? text.substring(0, text.length - 1) : text;
+    return AmountResult(
+      text: trimmed,
+      confidence: minConf,
+      value: double.tryParse(trimmed),
+    );
   }
 
   // ---------------------------------------------------------------- 工具

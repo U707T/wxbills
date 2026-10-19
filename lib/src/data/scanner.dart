@@ -15,6 +15,8 @@ class ScanProgress {
     this.done = 0,
     this.updated = 0,
     this.failed = 0,
+    this.loadFailed = 0,
+    this.retried = 0,
     this.currentName = '',
     this.finished = false,
     this.message = '',
@@ -25,7 +27,17 @@ class ScanProgress {
 
   /// 本次新增或金额有更新的条数。
   final int updated;
+
+  /// 识别跑完但没得出金额（可能图里没有金额，也可能版式不认识）。
   final int failed;
+
+  /// 连图片都没读出来（HEIC 解不了 / 权限被撤 / 大图 OOM）。和 [failed] 分开算，
+  /// 因为处理方式完全不同：前者要查来源和解码，后者才需要调识别。
+  final int loadFailed;
+
+  /// 本次重新走了一遍识别流程的已有记录数（含「重新识别全部」与未识别重试）。
+  final int retried;
+
   final String currentName;
   final bool finished;
   final String message;
@@ -61,9 +73,13 @@ class Scanner {
   /// 扫描全部已授权目录。
   ///
   /// [forceRecheck] 为 true 时忽略修改时间，全部重新识别（「重新识别全部」）。
+  /// [retryUnrecognized] 为 true 时，**没识别出金额的旧记录也会重试**——
+  /// 文件没改过不代表当时识别成功（Android SAF 的 lastModified 还可能恒为 0，
+  /// 只按时间判会永久跳过）。启动时的静默扫描传 false，避免每次开机全量重算。
   Future<ScanProgress> scanAll({
     void Function(ScanProgress)? onProgress,
     bool forceRecheck = false,
+    bool retryUnrecognized = true,
   }) async {
     _cancelled = false;
     final folders = store.folders;
@@ -105,6 +121,8 @@ class Scanner {
     var done = 0;
     var updated = 0;
     var failed = 0;
+    var loadFailed = 0;
+    var retried = 0;
 
     for (final ref in all) {
       if (_cancelled) break;
@@ -113,7 +131,13 @@ class Scanner {
       // 用户已经显式删除过这条记录：扫描不得推翻它。
       // 原文件还在磁盘上（删除只写墓碑），照旧重识别就会把它「复活」成正常记录。
       if (prev != null && prev.deleted) continue;
+      // 上次没识别出金额（且不是手工填的）：必须再试一次。
+      final retry = retryUnrecognized &&
+          prev != null &&
+          prev.amountCents == null &&
+          !prev.manual;
       final unchanged = !forceRecheck &&
+          !retry &&
           prev != null &&
           prev.fileModified == ref.modified;
 
@@ -124,6 +148,8 @@ class Scanner {
             done: done,
             updated: updated,
             failed: failed,
+            loadFailed: loadFailed,
+            retried: retried,
             currentName: ref.name,
           ));
         }
@@ -135,11 +161,15 @@ class Scanner {
         done: done - 1,
         updated: updated,
         failed: failed,
+        loadFailed: loadFailed,
+        retried: retried,
         currentName: ref.name,
       ));
 
       final id = prev?.id ?? newId();
+      if (prev != null) retried++;
       final outcome = await _recognize(ref, id);
+      if (outcome.loadFailed) loadFailed++;
       final now = DateTime.now().millisecondsSinceEpoch;
 
       if (prev == null) {
@@ -225,14 +255,20 @@ class Scanner {
     await store.save();
     await store.pruneThumbs();
 
-    final msg = '共 ${all.length} 张，更新 $updated 张'
-        '${failed > 0 ? '，$failed 张未识别' : ''}'
-        '${failedFolders.isEmpty ? '' : '（${failedFolders.length} 个目录读取失败，已跳过清理）'}';
+    final parts = <String>['共 ${all.length} 张，更新 $updated 张'];
+    if (failed > 0) parts.add('$failed 张未识别');
+    if (loadFailed > 0) parts.add('$loadFailed 张图片读取失败');
+    if (failedFolders.isNotEmpty) {
+      parts.add('${failedFolders.length} 个目录读取失败，已跳过清理');
+    }
+    final msg = parts.join('，');
     final result = ScanProgress(
       total: all.length,
       done: done,
       updated: updated,
       failed: failed,
+      loadFailed: loadFailed,
+      retried: retried,
       finished: true,
       message: msg,
     );
@@ -250,9 +286,14 @@ class Scanner {
   Future<_Outcome> _recognize(PhotoRef ref, String billId) async {
     int? cents;
     var confidence = 0.0;
+    // 「图都读不出来」和「读出来了但认不出金额」要分开报：
+    // 前者要查来源（HEIC 解不了 / 权限被撤 / 大图 OOM），后者才是识别算法的事。
+    var loadFailed = false;
     try {
       final ocr = await source.loadForOcr(ref.path);
-      if (ocr != null) {
+      if (ocr == null) {
+        loadFailed = true;
+      } else {
         final r = AmountReader.read(ocr.rgba, ocr.width, ocr.height);
         confidence = r.confidence;
         // 认出来就记下来：置信度不够的由界面标「待核对」，不丢数据
@@ -260,10 +301,11 @@ class Scanner {
       }
     } catch (_) {
       // 单张失败不影响整批
+      loadFailed = true;
     }
 
     final thumb = await _ensureThumb(ref, billId);
-    return _Outcome(cents, confidence, thumb);
+    return _Outcome(cents, confidence, thumb, loadFailed);
   }
 
   /// 缩略图文件名固定为 `<记录 id>.jpg` —— 同步（远端 thumbs/）与
@@ -288,8 +330,11 @@ class Scanner {
 }
 
 class _Outcome {
-  const _Outcome(this.cents, this.confidence, this.thumb);
+  const _Outcome(this.cents, this.confidence, this.thumb, this.loadFailed);
   final int? cents;
   final double confidence;
   final String thumb;
+
+  /// 图片根本没读出来（不是「读出来了但没认金额」）。
+  final bool loadFailed;
 }
