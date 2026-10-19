@@ -1,0 +1,157 @@
+import 'package:flutter/material.dart';
+
+import '../../model/bill.dart';
+import '../app_controller.dart';
+import '../theme.dart';
+import 'ui_kit.dart';
+
+/// 一条收款单。
+///
+/// 与旧版自绘 View 等价的信息层级：缩略图 → 金额（大字）→ 备注/文件名 → 时间，
+/// 右侧是状态标签与「刷新日期」按钮（仅 Android 显示）。
+class BillTile extends StatelessWidget {
+  const BillTile({
+    super.key,
+    required this.bill,
+    required this.flashing,
+    required this.controller,
+    required this.onEdit,
+    required this.onRefresh,
+    required this.onDelete,
+  });
+
+  final Bill bill;
+  final bool flashing;
+  final AppController controller;
+  final VoidCallback onEdit;
+  final VoidCallback onRefresh;
+  final VoidCallback onDelete;
+
+  @override
+  Widget build(BuildContext context) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final thumb = controller.thumbFileOf(bill);
+    final amountColor = bill.amountCents == null
+        ? (dark ? Palette.darkTextDim : Palette.textDim)
+        : (dark ? Palette.darkText : Palette.text);
+
+    final content = Padding(
+      padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          ThumbView(file: thumb, size: 58),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        bill.amountCents == null
+                            ? '未识别'
+                            : '¥ ${bill.amountYuan}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: amountStyle(context,
+                            size: 20,
+                            color: amountColor,
+                            weight: FontWeight.w700),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    if (bill.manual)
+                      const StatusChip(text: '手动', color: Palette.blue, dense: true)
+                    else if (bill.needsReview)
+                      const StatusChip(
+                          text: '待核对', color: Palette.amber, dense: true),
+                  ],
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  bill.note.isNotBlank ? bill.note : bill.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    color: dark ? Palette.darkTextDim : Palette.textDim,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  _formatTime(bill.fileModified),
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: dark ? Palette.darkTextDim : Palette.textDim,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 6),
+          if (controller.source.supportsRefreshDate)
+            IconButton(
+              onPressed: onRefresh,
+              tooltip: '刷新这张图片的日期（让 QQ/相册当成新图）',
+              icon: const Icon(Icons.refresh_rounded, size: 18),
+              style: IconButton.styleFrom(
+                backgroundColor: dark ? const Color(0xFF262A2C) : Palette.greenSoft,
+                foregroundColor: Palette.green,
+                minimumSize: const Size(34, 34),
+                padding: EdgeInsets.zero,
+              ),
+            ),
+          IconButton(
+            onPressed: onDelete,
+            tooltip: '删除记录',
+            icon: const Icon(Icons.delete_outline_rounded, size: 18),
+            style: IconButton.styleFrom(
+              foregroundColor: dark ? Palette.darkTextDim : Palette.textDim,
+              minimumSize: const Size(34, 34),
+              padding: EdgeInsets.zero,
+            ),
+          ),
+        ],
+      ),
+    );
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 220),
+      decoration: BoxDecoration(
+        color: flashing
+            ? (dark ? const Color(0xFF1C3A2A) : const Color(0xFFE8FBEF))
+            : (dark ? Palette.darkCard : Palette.card),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: flashing
+              ? Palette.green
+              : (dark ? Palette.darkLine : Palette.line),
+          width: flashing ? 1.2 : 1,
+        ),
+      ),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: onEdit,
+          child: content,
+        ),
+      ),
+    );
+  }
+
+  static String _formatTime(int ms) {
+    if (ms <= 0) return '—';
+    final d = DateTime.fromMillisecondsSinceEpoch(ms);
+    String two(int v) => v < 10 ? '0$v' : '$v';
+    return '${d.year}-${two(d.month)}-${two(d.day)} '
+        '${two(d.hour)}:${two(d.minute)}';
+  }
+}
+
+extension on String {
+  bool get isNotBlank => trim().isNotEmpty;
+}

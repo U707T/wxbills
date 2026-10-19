@@ -1,0 +1,33 @@
+name: wxbills
+description: "收款单管理：识别微信收款单金额、按金额排序定位，Android / Windows 双端，支持 WebDAV 同步。"
+publish_to: 'none'
+version: 2.0.0+5
+
+environment:
+  sdk: ^3.13.4
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+
+  # 纯 Dart 图片解码：Android(SAF) 与 Windows(文件路径) 共用同一条像素管线
+  image: ^4.10.1
+  # WebDAV 的 PROPFIND(multistatus) 响应解析
+  xml: ^6.6.1
+  # 本地数据目录 / 缩略图目录
+  path_provider: ^2.1.6
+  path: ^1.9.1
+  # Windows / 桌面：选目录、选图片
+  file_picker: ^13.1.0
+  # Android：SAF 目录授权与递归列目录
+  saf_util: ^3.1.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

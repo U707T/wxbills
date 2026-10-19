@@ -1,0 +1,191 @@
+name: ci
+
+on:
+  push:
+    branches: [ main, dev ]
+    paths-ignore: [ 'README.md', 'LICENSE' ]
+  pull_request:
+    paths-ignore: [ 'README.md', 'LICENSE' ]
+  workflow_dispatch:
+
+jobs:
+  # ---------------------------------------------------------------- 测试
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.47.5
+          cache: true
+      - name: Get dependencies
+        run: flutter pub get
+      - name: Analyze
+        run: dart analyze
+      # 含：18 张真实收款单的 OCR 回归、WebDAV 端到端同步（自建内存 DAV 服务器）、
+      #     合并/墓碑/冲突重试、存储原子写、扫描增量与「手工金额不被覆盖」、UI 冒烟
+      - name: Test
+        run: flutter test
+
+  # ---------------------------------------------------------------- Android
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.47.5
+          cache: true
+      - uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: 21
+      - name: Get dependencies
+        run: flutter pub get
+      # 固定签名：keystore 与口令来自仓库 secrets，保证每次构建签名一致
+      # （升级安装不必先卸载）。secret 缺失时自动退回 debug 签名。
+      - name: Decode and save keystore
+        run: echo "${{ secrets.KEYSTORE }}" | base64 --decode > android/app/keystore.jks
+      - name: Save key.properties
+        run: |
+          echo "storePassword=${{ secrets.STORE_PASSWORD }}" >> android/key.properties
+          echo "keyPassword=${{ secrets.KEY_PASSWORD }}" >> android/key.properties
+          echo "keyAlias=${{ secrets.KEY_ALIAS }}" >> android/key.properties
+          echo "storeFile=keystore.jks" >> android/key.properties
+      - name: Build debug APK (arm64)
+        run: flutter build apk --debug --target-platform=android-arm64
+      - name: Build release APKs (split per ABI)
+        run: flutter build apk --release --split-per-abi
+      - name: Rename APKs
+        run: |
+          mv build/app/outputs/flutter-apk/app-debug.apk WxBills-debug-arm64.apk
+          mv build/app/outputs/flutter-apk/app-arm64-v8a-release.apk WxBills-release-arm64-v8a.apk
+          mv build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk WxBills-release-armeabi-v7a.apk
+          mv build/app/outputs/flutter-apk/app-x86_64-release.apk WxBills-release-x86_64.apk
+      # Android 15+ 的 16KB 页大小兼容：APK 内 .so 必须页对齐，且 ELF LOAD 段 >= 16KB
+      - name: Verify 16 KB page-size compatibility
+        run: |
+          BT=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)
+          ZIPALIGN="$ANDROID_HOME/build-tools/$BT/zipalign"
+          for apk in WxBills-release-arm64-v8a.apk WxBills-release-x86_64.apk; do
+            if "$ZIPALIGN" -h 2>&1 | grep -q -- " -P "; then
+              "$ZIPALIGN" -c -P 16 -v 4 "$apk" > /dev/null \
+                || { echo "::error::$apk 内的 .so 未按 16KB 对齐"; exit 1; }
+            fi
+          done
+          rm -rf /tmp/apk-align && mkdir -p /tmp/apk-align
+          unzip -q WxBills-release-arm64-v8a.apk -d /tmp/apk-align 'lib/arm64-v8a/*'
+          python3 - <<'PY'
+          import glob, subprocess, sys
+          bad = []
+          for so in glob.glob('/tmp/apk-align/lib/**/*.so', recursive=True):
+              out = subprocess.check_output(['readelf', '-lW', so], text=True)
+              for line in out.splitlines():
+                  if line.strip().startswith('LOAD'):
+                      align = int(line.split()[-1], 16)
+                      if align < 0x4000:
+                          bad.append((so, hex(align)))
+          if bad:
+              print('未按 16KB 对齐的库：', bad)
+              sys.exit(1)
+          print('16KB 兼容检查通过')
+          PY
+      # 关键权限必须存在（缺 INTERNET 同步直接废掉；缺 MANAGE_EXTERNAL_STORAGE 刷新日期失效）
+      - name: Verify manifest permissions
+        run: |
+          BT=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)
+          "$ANDROID_HOME/build-tools/$BT/aapt2" dump badging WxBills-release-arm64-v8a.apk > badging.txt
+          grep -q "android.permission.INTERNET" badging.txt
+          grep -q "android.permission.READ_MEDIA_IMAGES" badging.txt
+          grep -q "android.permission.MANAGE_EXTERNAL_STORAGE" badging.txt
+          grep -q "application-label:'收款单管理'" badging.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WxBills-debug-arm64.apk
+          path: WxBills-debug-arm64.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WxBills-release-apks
+          path: WxBills-release-*.apk
+
+  # ---------------------------------------------------------------- Windows x64
+  build-windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.47.5
+          cache: true
+      - name: Get dependencies
+        run: flutter pub get
+      - name: Build Windows application (x64)
+        run: flutter build windows --release
+      - name: Package ZIP
+        shell: pwsh
+        run: |
+          mkdir WxBills
+          Copy-Item -Path "build\windows\x64\runner\Release\*" -Destination "WxBills" -Recurse -Force
+          Compress-Archive -Path "WxBills" -DestinationPath "WxBills-windows-x64.zip" -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WxBills-windows-x64.zip
+          path: WxBills-windows-x64.zip
+
+  # ---------------------------------------------------------------- 发布
+  # 仅当 pubspec.yaml 的版本号还没有对应 tag 时才创建 Release
+  release:
+    if: |
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    needs: [ test, build-android, build-windows ]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get version
+        id: yq
+        uses: mikefarah/yq@master
+        with:
+          cmd: yq '.version' 'pubspec.yaml'
+      - name: Prepare tag name
+        id: tag_name
+        run: |
+          VERSION="${{ steps.yq.outputs.result }}"
+          TAG_NAME="v${VERSION%%+*}"
+          echo "TAG_NAME=$TAG_NAME" >> "$GITHUB_OUTPUT"
+          case "$TAG_NAME" in
+            *-*) echo "PRERELEASE=true" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "PRERELEASE=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+      - name: Check tag
+        id: check-tag
+        uses: mukunku/tag-exists-action@v1.6.0
+        with:
+          tag: ${{ steps.tag_name.outputs.TAG_NAME }}
+      - uses: actions/download-artifact@v4
+        if: steps.check-tag.outputs.exists == 'false'
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Release
+        if: steps.check-tag.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.tag_name.outputs.TAG_NAME }}
+          name: ${{ steps.tag_name.outputs.TAG_NAME }}
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ steps.tag_name.outputs.PRERELEASE == 'true' }}
+          files: |
+            artifacts/WxBills-windows-x64.zip
+            artifacts/WxBills-debug-arm64.apk
+            artifacts/WxBills-release-armeabi-v7a.apk
+            artifacts/WxBills-release-arm64-v8a.apk
+            artifacts/WxBills-release-x86_64.apk

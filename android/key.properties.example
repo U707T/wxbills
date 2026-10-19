@@ -1,0 +1,6 @@
+# 复制为 android/key.properties 后填入自己的签名信息（该文件已在 .gitignore 里）。
+# CI 上用仓库 secrets 注入，本地不填则自动退回 debug 签名。
+storePassword=你的store密码
+keyPassword=你的key密码
+keyAlias=你的别名
+storeFile=keystore.jks
