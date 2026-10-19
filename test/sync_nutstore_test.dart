@@ -90,8 +90,10 @@ void main() {
     final snapshotPuts = server.putCount('/dav/wxbills/bills.json');
     final thumbPuts = server.putCount('/dav/wxbills/thumbs/t1.jpg');
     final totalPuts = server.callCount('PUT');
-    expect(snapshotPuts, 1);
-    expect(thumbPuts, 1);
+    // 首次同步可能是「PUT → 父目录不存在 409 → 建目录 → PUT」两步，
+    // 这里只要求「写出去了」，后面的关键断言是「第二次不再写」。
+    expect(snapshotPuts, greaterThanOrEqualTo(1));
+    expect(thumbPuts, greaterThanOrEqualTo(1));
     expect(server.getCount('/dav/wxbills/thumbs/t1.jpg'), 0,
         reason: '本机已有这张缩略图，不该再去下载');
 
@@ -140,17 +142,19 @@ void main() {
     await a.save();
     final first = await SyncEngine(a).run();
     expect(first.ok, isTrue, reason: first.message);
+    final putsAfterFirst = server.putCount('/dav/wxbills/bills.json');
 
     a.put(makeBill(id: 'x', cents: 200, updatedAt: 2000));
     await a.save();
     final second = await SyncEngine(a).run();
     expect(second.ok, isTrue,
         reason: '弱 ETag 直接当 If-Match 发会被规范实现一律 412：${second.message}');
-    expect(server.putCount('/dav/wxbills/bills.json'), 2);
+    expect(server.putCount('/dav/wxbills/bills.json'), putsAfterFirst + 1,
+        reason: '改了一条就该只多写一次');
 
     // 第三轮没有改动：不该再写
     expect((await SyncEngine(a).run()).ok, isTrue);
-    expect(server.putCount('/dav/wxbills/bills.json'), 2);
+    expect(server.putCount('/dav/wxbills/bills.json'), putsAfterFirst + 1);
 
     await dirsA.root.delete(recursive: true);
   });
@@ -203,9 +207,10 @@ void main() {
 
     final r = await SyncEngine(a).run();
     expect(r.ok, isFalse);
-    expect(r.message, contains('只能读'),
-        reason: '要说明是根目录不可写，而不是甩一段服务端 XML：${r.message}');
-    expect(r.message, contains('wxbills'), reason: '要给出可照做的子目录地址：${r.message}');
+    expect(r.message, contains('ObjectNotFound'),
+        reason: '要说清是服务端拒绝了写入，而不是甩一段 XML：${r.message}');
+    expect(r.message, contains('手动新建'), reason: '要给出可照做的动作：${r.message}');
+    expect(r.message, contains('wxbills'), reason: '要给出可照做的地址：${r.message}');
 
     await dirsA.root.delete(recursive: true);
   });
@@ -230,12 +235,31 @@ void main() {
 
     a.setSync(cfgFor(server, sub: ''));
     final rootMsg = await SyncEngine(a).testConnection();
-    expect(rootMsg, contains('只能读'),
-        reason: '只读根必须在测试连接这一步就暴露，而不是等同步失败：$rootMsg');
+    expect(rootMsg, contains('写入'),
+        reason: '根目录不可写必须在测试连接这一步就暴露，而不是等同步失败：$rootMsg');
 
     a.setSync(cfgFor(server));
     final okMsg = await SyncEngine(a).testConnection();
     expect(okMsg, contains('可读可写'), reason: okMsg);
+
+    await dirsA.root.delete(recursive: true);
+  });
+
+  test('允许写文件但拒绝建目录：记录照样同步，缩略图失败要看得见', () async {
+    server.refuseMkcol = true;
+    final (dirsA, a) = await newDevice('a');
+    a.setSync(cfgFor(server, sub: '')); // 直接写网盘根
+    await a.writeThumb('t1.jpg', [1, 2, 3]);
+    a.put(makeBill(id: 'x', updatedAt: 1000, thumb: 't1.jpg'));
+    await a.save();
+
+    final r = await SyncEngine(a).run();
+    expect(r.ok, isTrue, reason: r.message);
+    expect(server.getFile('/dav/bills.json'), isNotNull,
+        reason: '不该因为「建目录被拒」就整套同步失败：先直接写文件');
+    expect(r.message, contains('缩略图目录创建失败'),
+        reason: '缩略图没同步要写在汇总里，不能静默：${r.message}');
+    expect(a.byId('x')!.amountCents, 1000);
 
     await dirsA.root.delete(recursive: true);
   });

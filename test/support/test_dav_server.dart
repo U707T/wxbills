@@ -45,6 +45,9 @@ class TestDavServer {
   /// `404 ObjectNotFound`（这就是真机上「测试连接通过、同步却 404」的原因）。
   bool refusePutAtRoot = false;
 
+  /// 模拟「允许写文件、但拒绝建目录」：MKCOL 一律 403。
+  bool refuseMkcol = false;
+
   /// 置为非 0 时，接下来 N 次 PUT 会先被「别的设备」抢先写一次，
   /// 用来验证客户端会重新下载 → 重新合并 → 再写。
   int forceConflictOnPut = 0;
@@ -217,6 +220,16 @@ class TestDavServer {
     putCounts[path] = (putCounts[path] ?? 0) + 1;
     final body = await _readAll(request);
 
+    // 真实服务端的行为：父集合不存在时 PUT 回 409 Conflict（不是 404）
+    final parent = path.contains('/')
+        ? path.substring(0, path.lastIndexOf('/') + 1)
+        : '/';
+    if (!files.containsKey(parent)) {
+      request.response.statusCode = 409;
+      await request.response.close();
+      return;
+    }
+
     if (refusePutAtRoot) {
       final parent = path.contains('/')
           ? path.substring(0, path.lastIndexOf('/') + 1)
@@ -276,6 +289,11 @@ class TestDavServer {
   }
 
   Future<void> _mkcol(HttpRequest request, String path) async {
+    if (refuseMkcol && path != '$root/') {
+      request.response.statusCode = 403;
+      await request.response.close();
+      return;
+    }
     if (files.containsKey(path)) {
       request.response.statusCode = 405;
       await request.response.close();

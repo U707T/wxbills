@@ -230,7 +230,14 @@ class _SettingsPageState extends State<SettingsPage> {
             const SizedBox(height: 2),
             Text(
               cfg.lastSyncMessage,
-              style: const TextStyle(fontSize: 11.5, color: Palette.textDim),
+              // 失败信息用红色：这段是唯一的排错线索，不能和说明文字混在一起
+              style: TextStyle(
+                fontSize: 11.5,
+                height: 1.5,
+                color: cfg.lastSyncMessage.contains('失败')
+                    ? Palette.red
+                    : Palette.textDim,
+              ),
             ),
           ],
           if (_testResult.isNotEmpty) ...[

@@ -97,13 +97,8 @@ class SyncEngine {
       onProgress?.call(const SyncProgress('连接服务器…', 0, 1));
       final snapshotUrl = '${client.root}/$snapshotName';
       final dirUrl = '${client.root}/';
-      // 先读一次目录：存在就不再 MKCOL（省两次无意义的写请求），顺便早一步发现 401
-      try {
-        await client.list(dirUrl);
-      } on WebDavException catch (e) {
-        if (e.status != 404) rethrow;
-        await client.ensureDir(dirUrl);
-      }
+      // 刻意不在这里 MKCOL：坚果云这类网盘上「允许写文件、但拒绝建目录」是真实存在的
+      // 组合。直接写快照，只有父目录确实不存在（404/409）时才去建目录再重试。
 
       // ---------------------------------------------------------- 1. 下载 + 合并
       onProgress?.call(const SyncProgress('下载远端数据…', 0, 1));
@@ -180,16 +175,29 @@ class SyncEngine {
         if (needWrite) {
           try {
             try {
-              await client.put(
-                snapshotUrl,
-                payload,
-                ifMatch: remote.etag,
-                createOnly: remote.bytes == null,
-              );
-            } on PreconditionFailedException {
-              rethrow;
+              try {
+                await client.put(
+                  snapshotUrl,
+                  payload,
+                  ifMatch: remote.etag,
+                  createOnly: remote.bytes == null,
+                );
+              } on PreconditionFailedException {
+                rethrow;
+              } on WebDavException catch (e) {
+                if (e.status != 404 && e.status != 409) rethrow;
+                // 父目录不存在：建一次再重试（建不出来就是下面的提示）
+                await client.ensureDir(dirUrl);
+                await client.put(
+                  snapshotUrl,
+                  payload,
+                  ifMatch: remote.etag,
+                  createOnly: remote.bytes == null,
+                );
+              }
             } on WebDavException catch (e) {
-              // 根目录不可写这类问题（坚果云），把具体怎么改直接写进结果
+              if (e is PreconditionFailedException) rethrow;
+              // 写不进去这类问题，把具体怎么改直接写进结果
               throw WebDavException(_uploadHint(e, client.root), e, e.status);
             }
             pushed = toPush;
@@ -211,7 +219,8 @@ class SyncEngine {
         );
 
         final now = DateTime.now().millisecondsSinceEpoch;
-        final summary = _summary(pushed, pulled, thumbStats.$1, thumbStats.$2);
+        final summary = _summary(pushed, pulled, thumbStats.$1, thumbStats.$2,
+            thumbsDirFailed: thumbsDirMissing);
         store.recordSync(now, summary);
         await store.save();
         onProgress?.call(SyncProgress('完成', 1, 1, message: summary));
@@ -289,11 +298,20 @@ class SyncEngine {
   /// 坚果云的 WebDAV 根目录（`https://dav.jianguoyun.com/dav/`）**只读**：
   /// PROPFIND 正常、PUT 却回 404 ObjectNotFound。文件必须写在子目录里。
   static String _uploadHint(WebDavException e, String root) {
-    if (e.status == 404) {
-      final base = root.replaceAll(RegExp(r'/+$'), '');
-      return '上传失败：服务端回答这个位置不存在（HTTP 404 ObjectNotFound）。'
-          '坚果云的 WebDAV 根目录只能读、不能直接写文件——把服务器地址改成一个子目录，'
-          '例如 $base/wxbills，再点「测试连接」。';
+    final base = root.replaceAll(RegExp(r'/+$'), '');
+    if (e.status == 404 || e.status == 409) {
+      return '上传失败：服务端说这个位置不存在（HTTP ${e.status} ObjectNotFound），'
+          '而且自动建目录也没成功。这通常是网盘对 WebDAV 的**写入**有限制：\n'
+          '① 先在坚果云 App / 网页里手动新建一个文件夹（例如 wxbills）；\n'
+          '② 把服务器地址填成 $base/wxbills ；\n'
+          '③ 再点「测试连接」——它会真的写一个探针文件来验证能不能写。';
+    }
+    if (e.status == 403) {
+      return '上传失败：这个账号在 $base 上没有写入权限（HTTP 403）。'
+          '坚果云请确认用的是「应用密码」，且没有开启只读限制。';
+    }
+    if (e.status == 507 || e.status == 429) {
+      return '上传失败：网盘空间不足或触发了限流（HTTP ${e.status}）。';
     }
     return e.message;
   }
@@ -323,6 +341,9 @@ class SyncEngine {
   // ---------------------------------------------------------------- 缩略图
 
   /// 返回（上传数, 下载数）。
+  /// 本次同步中「缩略图目录建不出来」——记录照样同步，但汇总里要说清楚。
+  bool thumbsDirMissing = false;
+
   Future<(int, int)> _syncThumbs(
     WebDavClient client,
     List<Bill> bills,
@@ -343,7 +364,8 @@ class SyncEngine {
         try {
           await client.ensureDir(base);
         } on WebDavException {
-          // 建不出来就让下面的逐张上传各自报错，不阻断整个同步
+          // 建不出来不阻断记录同步，但要让用户看到（汇总里会写）
+          thumbsDirMissing = true;
         }
       }
       // 列目录失败就当远端全空，逐个补传即可
@@ -443,12 +465,14 @@ class SyncEngine {
       a.thumb == b.thumb &&
       a.updatedAt == b.updatedAt;
 
-  static String _summary(int pushed, int pulled, int up, int down) {
+  static String _summary(int pushed, int pulled, int up, int down,
+      {bool thumbsDirFailed = false}) {
     final parts = <String>[];
     if (pushed > 0) parts.add('上传 $pushed 条');
     if (pulled > 0) parts.add('拉取 $pulled 条');
     if (up > 0) parts.add('上传缩略图 $up 张');
     if (down > 0) parts.add('下载缩略图 $down 张');
+    if (thumbsDirFailed) parts.add('缩略图目录创建失败，本次只同步了记录');
     return parts.isEmpty ? '已是最新，无需同步' : '同步完成：${parts.join('，')}';
   }
 }
