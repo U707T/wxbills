@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import '../model/bill.dart';
 import 'digit_templates.dart';
 
 /// 微信收款单金额识别器（专用，不是通用 OCR）。
@@ -16,8 +17,9 @@ import 'digit_templates.dart';
 class AmountReader {
   AmountReader._();
 
-  /// 低于这个置信度就标「待核对」。
-  static const double confidenceThreshold = 0.80;
+  /// 低于这个置信度就标「待核对」。定义在 [kConfidenceThreshold]，这里只做别名，
+  /// 保证 OCR 侧与界面侧永远是同一个数。
+  static const double confidenceThreshold = kConfidenceThreshold;
 
   /// 识别 [rgba]（每像素 4 字节，R/G/B/A）尺寸为 [width] x [height] 的图。
   static AmountResult read(Uint8List rgba, int width, int height) {
@@ -290,11 +292,14 @@ class AmountReader {
       for (var tx = 0; tx < tw; tx++) {
         final sx0 = tx * sw ~/ tw;
         final sx1 = _imax(sx0 + 1, (tx + 1) * sw ~/ tw);
+        final end = _imin(sx1, sw);
         var hit = 0;
-        for (var sx = sx0; sx < _imin(sx1, sw); sx++) {
+        for (var sx = sx0; sx < end; sx++) {
           if ((bits >> sx) & 1 == 1) hit++;
         }
-        out[ty * tw + tx] = hit / (sx1 - sx0);
+        // 分母必须和扫描上界一致地夹到 sw，否则最右一列的模板值系统性偏小
+        final denom = end - sx0;
+        out[ty * tw + tx] = denom > 0 ? hit / denom : 0;
       }
     }
     _templateCache[key] = out;

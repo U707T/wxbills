@@ -1,5 +1,11 @@
 import 'dart:math';
 
+/// 识别结果「够不够可信」的唯一阈值。
+///
+/// OCR 侧（[AmountResult.ok]）和界面侧（[Bill.needsReview] 的标黄）共用这一个数，
+/// 不再各写一份——否则调阈值时必然只改一处，出现「标了待核对但 OCR 认为 OK」。
+const double kConfidenceThreshold = 0.84;
+
 /// 一张收款单。
 ///
 /// 关键设计（相比原 Android 单机版）：
@@ -67,7 +73,8 @@ class Bill {
   double get amountValue => (amountCents ?? 0) / 100.0;
 
   /// 需要人工核对：识别成功但置信度不够。
-  bool get needsReview => !manual && amountCents != null && confidence < 0.84;
+  bool get needsReview =>
+      !manual && amountCents != null && confidence < kConfidenceThreshold;
 
   Bill copyWith({
     String? name,
@@ -153,6 +160,20 @@ class Bill {
     return neg ? '-$body' : body;
   }
 
+  /// 元 → 分。非法 / 非有限数 / 超范围返回 null。
+  ///
+  /// 这是全项目唯一的「元转分」入口：扫描、手动编辑、OCR 都走它，
+  /// 免得三处各写一遍 `.round()` 导致同一条记录在不同路径下差一分。
+  static int? centsFromYuan(double? yuan) {
+    if (yuan == null || !yuan.isFinite) return null;
+    if (yuan < 0 || yuan > 9999999) return null;
+    return (yuan * 100).round();
+  }
+
+  /// 只接受「1 / 1.5 / 12.34」这类金额文本，最多 7 位整数 + 2 位小数。
+  /// 挡住 `1e3`、`NaN`（`double.tryParse('NaN')` 会成功并让 `.round()` 抛异常）。
+  static final RegExp _yuanPattern = RegExp(r'^(?:\d{1,7}(?:\.\d{1,2})?|\.\d{1,2})$');
+
   /// 元文本 → 分。非法返回 null。
   static int? parseYuan(String text) {
     final t = text
@@ -162,24 +183,25 @@ class Bill {
         .replaceAll(',', '')
         .replaceAll(' ', '');
     if (t.isEmpty) return null;
-    final d = double.tryParse(t);
-    if (d == null) return null;
-    if (d < 0 || d > 9999999) return null;
-    return (d * 100).round();
+    if (!_yuanPattern.hasMatch(t)) return null;
+    return centsFromYuan(double.tryParse(t));
   }
 }
 
 const Object _sentinel = Object();
 
-/// 同步合并：同一 id 的两条记录，取 [updatedAt] 更新的那条。
+/// 同步合并：同一 id 的两条记录，谁说了算。
 ///
-/// 平手时按「信息更多者优先」兜底（有金额 > 无金额，手动 > 自动），
-/// 保证两台设备独立操作后仍能收敛到同一个结果，而不是随机胜负。
+/// 两条规则，顺序固定：
+///  1. **删除优先**：一方删除、一方修改时，删除胜。否则「手机删掉、电脑上顺手改个
+///     备注」就会把记录复活，用户只会认为删除功能坏了。
+///  2. 都没删（或都删了）时取 [updatedAt] 更新的那条；平手按「信息更多者优先」
+///     兜底（有金额 > 无金额，手动 > 自动），保证两端独立操作后仍收敛到同一结果。
 Bill mergeBill(Bill local, Bill remote) {
+  if (local.deleted != remote.deleted) return local.deleted ? local : remote;
   if (remote.updatedAt != local.updatedAt) {
     return remote.updatedAt > local.updatedAt ? remote : local;
   }
-  if (remote.deleted != local.deleted) return remote.deleted ? remote : local;
   if ((local.amountCents == null) != (remote.amountCents == null)) {
     return local.amountCents == null ? remote : local;
   }

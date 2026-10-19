@@ -4,49 +4,6 @@ import 'package:flutter/material.dart';
 
 import '../theme.dart';
 
-/// 一个自适应布局：宽屏（桌面）时列表与侧栏并排，窄屏时单列。
-class ResponsiveBody extends StatelessWidget {
-  const ResponsiveBody({
-    super.key,
-    required this.main,
-    this.side,
-    this.breakpoint = 900,
-    this.sideWidth = 360,
-  });
-
-  final Widget main;
-  final Widget? side;
-  final double breakpoint;
-  final double sideWidth;
-
-  @override
-  Widget build(BuildContext context) {
-    if (side == null) return main;
-    return LayoutBuilder(builder: (context, constraints) {
-      if (constraints.maxWidth < breakpoint) return main;
-      return Row(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Expanded(child: main),
-          Container(
-            width: sideWidth,
-            decoration: BoxDecoration(
-              border: Border(
-                left: BorderSide(
-                  color: Theme.of(context).brightness == Brightness.dark
-                      ? Palette.darkLine
-                      : Palette.line,
-                ),
-              ),
-            ),
-            child: side,
-          ),
-        ],
-      );
-    });
-  }
-}
-
 /// 内容最大宽度约束（桌面端避免一行拉太宽）。
 class ContentWidth extends StatelessWidget {
   const ContentWidth({super.key, required this.child, this.max = Dimens.maxContentWidth});
@@ -218,48 +175,19 @@ class HeaderIconButton extends StatelessWidget {
     required this.icon,
     required this.onPressed,
     this.tooltip,
-    this.badge = 0,
   });
 
   final IconData icon;
   final VoidCallback onPressed;
   final String? tooltip;
-  final int badge;
 
   @override
   Widget build(BuildContext context) {
-    final button = IconButton(
+    return IconButton(
       onPressed: onPressed,
       icon: Icon(icon, color: Colors.white, size: 21),
       tooltip: tooltip,
       visualDensity: VisualDensity.compact,
-    );
-    if (badge <= 0) return button;
-    return Stack(
-      clipBehavior: Clip.none,
-      children: [
-        button,
-        Positioned(
-          right: 2,
-          top: 2,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-            decoration: BoxDecoration(
-              color: Palette.red,
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Text(
-              '$badge',
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 9.5,
-                fontWeight: FontWeight.w700,
-                height: 1.2,
-              ),
-            ),
-          ),
-        ),
-      ],
     );
   }
 }
@@ -279,8 +207,12 @@ class BusyBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final bg = dark ? Palette.darkCard : const Color(0xFFF0FFF6);
+    final fg = dark ? Palette.green : Palette.greenDark;
+    final track = dark ? Palette.darkLine : const Color(0xFFD7F2E3);
     return Container(
-      color: const Color(0xFFF0FFF6),
+      color: bg,
       padding: const EdgeInsets.fromLTRB(16, 9, 12, 10),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -292,9 +224,9 @@ class BusyBar extends StatelessWidget {
                   label,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 12,
-                    color: Palette.greenDark,
+                    color: fg,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
@@ -302,10 +234,10 @@ class BusyBar extends StatelessWidget {
               if (onCancel != null)
                 GestureDetector(
                   onTap: onCancel,
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 6),
-                    child: Text('取消',
-                        style: TextStyle(fontSize: 12, color: Palette.textDim)),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 6),
+                    child: Text('停止',
+                        style: TextStyle(fontSize: 12, color: fg)),
                   ),
                 ),
             ],
@@ -316,7 +248,7 @@ class BusyBar extends StatelessWidget {
             child: LinearProgressIndicator(
               value: fraction <= 0 ? null : fraction,
               minHeight: 4,
-              backgroundColor: const Color(0xFFD7F2E3),
+              backgroundColor: track,
               valueColor: const AlwaysStoppedAnimation(Palette.green),
             ),
           ),
@@ -432,45 +364,6 @@ class ThumbView extends StatelessWidget {
   }
 }
 
-/// 一条可点击的统计项（顶部总额那块用）。
-class StatBlock extends StatelessWidget {
-  const StatBlock({
-    super.key,
-    required this.label,
-    required this.value,
-    this.color,
-  });
-
-  final String label;
-  final String value;
-  final Color? color;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text(
-          label,
-          style: const TextStyle(color: Color(0xCCFFFFFF), fontSize: 11.5),
-        ),
-        const SizedBox(height: 2),
-        Text(
-          value,
-          style: TextStyle(
-            color: color ?? Colors.white,
-            fontSize: 17,
-            fontWeight: FontWeight.w700,
-            fontFeatures: const [FontFeature.tabularFigures()],
-            height: 1.2,
-          ),
-        ),
-      ],
-    );
-  }
-}
-
 /// 顶部/底部通用的「分段选择」（排序切换）。
 class SegmentedBar<T> extends StatelessWidget {
   const SegmentedBar({
@@ -551,7 +444,6 @@ class ActionButton extends StatelessWidget {
     required this.onPressed,
     this.primary = false,
     this.busy = false,
-    this.expand = true,
   });
 
   final IconData icon;
@@ -559,28 +451,29 @@ class ActionButton extends StatelessWidget {
   final VoidCallback? onPressed;
   final bool primary;
   final bool busy;
-  final bool expand;
 
   @override
   Widget build(BuildContext context) {
-    final child = FilledButton.tonalIcon(
-      onPressed: busy ? null : onPressed,
-      icon: busy
-          ? const SizedBox(
-              width: 14,
-              height: 14,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            )
-          : Icon(icon, size: 17),
-      label: Text(label, style: const TextStyle(fontSize: 13)),
-      style: FilledButton.styleFrom(
-        minimumSize: const Size(0, 40),
-        padding: const EdgeInsets.symmetric(horizontal: 10),
-        backgroundColor: primary ? Palette.green : null,
-        foregroundColor: primary ? Colors.white : null,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+    return SizedBox(
+      width: double.infinity,
+      child: FilledButton.tonalIcon(
+        onPressed: busy ? null : onPressed,
+        icon: busy
+            ? const SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : Icon(icon, size: 17),
+        label: Text(label, style: const TextStyle(fontSize: 13)),
+        style: FilledButton.styleFrom(
+          minimumSize: const Size(0, 40),
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          backgroundColor: primary ? Palette.green : null,
+          foregroundColor: primary ? Colors.white : null,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ),
       ),
     );
-    return expand ? SizedBox(width: double.infinity, child: child) : child;
   }
 }

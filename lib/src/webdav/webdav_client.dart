@@ -25,7 +25,6 @@ class DavEntry {
     required this.isDirectory,
     required this.size,
     this.etag = '',
-    this.lastModified = 0,
   });
 
   final String url;
@@ -37,9 +36,6 @@ class DavEntry {
 
   /// 服务器给出的 ETag（含引号原样保留），未知为空串。
   final String etag;
-
-  /// 最后修改时间（毫秒），未知为 0。
-  final int lastModified;
 
   @override
   String toString() => 'DavEntry($url, dir=$isDirectory, size=$size)';
@@ -91,7 +87,7 @@ class WebDavClient {
   static final Uint8List _propfindBody = Uint8List.fromList(utf8.encode(
     '<?xml version="1.0" encoding="utf-8"?>\n'
     '<D:propfind xmlns:D="DAV:"><D:prop>'
-    '<D:resourcetype/><D:getcontentlength/><D:getetag/><D:getlastmodified/>'
+    '<D:resourcetype/><D:getcontentlength/><D:getetag/>'
     '</D:prop></D:propfind>',
   ));
 
@@ -107,22 +103,6 @@ class WebDavClient {
       throw WebDavException('列目录失败 HTTP ${r.status}${_suffix(text)}', null, r.status);
     }
     return _parseMultiStatus(text, base);
-  }
-
-  /// 资源信息（Depth:0）。不存在返回 null。
-  Future<DavEntry?> stat(String url) async {
-    final r = await _send('PROPFIND', url,
-        headers: const {'Depth': '0'}, body: _propfindBody);
-    if (r.status == 404) {
-      await _drain(r.response);
-      return null;
-    }
-    final text = await _readText(r.response, limit: _xmlLimit);
-    if (!_isSuccess(r.status) && r.status != 207) {
-      throw WebDavException('请求失败 HTTP ${r.status}${_suffix(text)}', null, r.status);
-    }
-    final entries = _parseMultiStatus(text, url);
-    return entries.isEmpty ? null : entries.first;
   }
 
   /// 目录不存在就创建（逐级 MKCOL，已存在返回 405 视为成功）。
@@ -147,7 +127,13 @@ class WebDavClient {
   // ---------------------------------------------------------------- 读
 
   /// 下载整个文件。返回（字节, ETag）。文件不存在时 bytes 为 null。
-  Future<({Uint8List? bytes, String etag})> get(String url) async {
+  ///
+  /// [limit] 是硬上限：配置写错指到一个大文件、或服务端把请求重定向到视频时，
+  /// 不能把内存吃满（Android 上就是 OOM 被杀）。快照正常只有几十 KB。
+  Future<({Uint8List? bytes, String etag})> get(
+    String url, {
+    int limit = 32 << 20,
+  }) async {
     final r = await _send('GET', url);
     if (r.status == 404) {
       await _drain(r.response);
@@ -157,7 +143,7 @@ class WebDavClient {
       final text = await _readText(r.response, limit: 512);
       throw WebDavException('下载失败 HTTP ${r.status}${_suffix(text)}', null, r.status);
     }
-    final bytes = await _readAll(r.response);
+    final bytes = await _readAll(r.response, limit: limit);
     final etag = r.headers.value(HttpHeaders.etagHeader) ?? '';
     return (bytes: bytes, etag: etag);
   }
@@ -190,23 +176,6 @@ class WebDavClient {
     return r.headers.value(HttpHeaders.etagHeader) ?? '';
   }
 
-  Future<void> delete(String url) async {
-    final r = await _send('DELETE', url);
-    final text = await _readText(r.response, limit: 512);
-    if (!_isSuccess(r.status) && r.status != 404) {
-      throw WebDavException('删除失败 HTTP ${r.status}${_suffix(text)}', null, r.status);
-    }
-  }
-
-  /// 文件是否存在，返回 ETag（不存在返回 null）。
-  Future<String?> head(String url) async {
-    final r = await _send('HEAD', url);
-    await _drain(r.response);
-    if (r.status == 404) return null;
-    if (!_isSuccess(r.status)) return null;
-    return r.headers.value(HttpHeaders.etagHeader) ?? '';
-  }
-
   // ---------------------------------------------------------------- URL 工具
 
   String resolve(String hrefRaw, String against) {
@@ -220,14 +189,6 @@ class WebDavClient {
   }
 
   String ensureTrailingSlash(String url) => url.endsWith('/') ? url : '$url/';
-
-  /// 在 [url] 所在目录下生成同级资源 URL。
-  String sibling(String url, String newName) {
-    final trimmed = url.replaceAll(RegExp(r'/+$'), '');
-    final idx = trimmed.lastIndexOf('/');
-    final parent = idx >= 0 ? trimmed.substring(0, idx) : '';
-    return '$parent/${encodeSegment(newName)}';
-  }
 
   String fileNameOf(String url) {
     final trimmed = url.replaceAll(RegExp(r'/+$'), '');
@@ -256,11 +217,14 @@ class WebDavClient {
     }
   }
 
-  Future<Uint8List> _readAll(HttpClientResponse response) async {
+  Future<Uint8List> _readAll(HttpClientResponse response, {required int limit}) async {
     final builder = BytesBuilder(copy: false);
     try {
       await for (final chunk in response.timeout(readTimeout)) {
         builder.add(chunk);
+        if (builder.length > limit) {
+          throw WebDavException('响应过大（已接收 ${builder.length} 字节，上限 $limit）');
+        }
       }
     } on TimeoutException {
       throw WebDavException('读取响应超时（已接收 ${builder.length} 字节）');
@@ -371,8 +335,6 @@ class WebDavClient {
       final size = int.tryParse(sizeEl?.innerText.trim() ?? '') ?? -1;
       final etag =
           _firstOrNull(resp.findAllElements('getetag', namespace: '*'))?.innerText.trim() ?? '';
-      final lmText =
-          _firstOrNull(resp.findAllElements('getlastmodified', namespace: '*'))?.innerText.trim();
       final clean = url.replaceAll(RegExp(r'/+$'), '');
       out.add(DavEntry(
         url: isDir ? '$clean/' : clean,
@@ -380,36 +342,9 @@ class WebDavClient {
         isDirectory: isDir,
         size: size,
         etag: etag,
-        lastModified: _parseHttpDate(lmText),
       ));
     }
     return out;
-  }
-
-  /// 解析 RFC 1123 时间（`Wed, 21 Oct 2015 07:28:00 GMT`）。失败返回 0。
-  static int _parseHttpDate(String? text) {
-    if (text == null || text.isEmpty) return 0;
-    const months = {
-      'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
-      'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12,
-    };
-    final m = RegExp(r'(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})\s+(\d{2}):(\d{2}):(\d{2})')
-        .firstMatch(text);
-    if (m == null) return 0;
-    final month = months[m.group(2)!.toLowerCase()];
-    if (month == null) return 0;
-    try {
-      return DateTime.utc(
-        int.parse(m.group(3)!),
-        month,
-        int.parse(m.group(1)!),
-        int.parse(m.group(4)!),
-        int.parse(m.group(5)!),
-        int.parse(m.group(6)!),
-      ).millisecondsSinceEpoch;
-    } catch (_) {
-      return 0;
-    }
   }
 
   static T? _firstOrNull<T>(Iterable<T> items) => items.isEmpty ? null : items.first;

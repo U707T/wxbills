@@ -12,7 +12,10 @@ Future<void> writeJsonAtomic(File target, Object? value) async {
   await tmp.rename(target.path);
 }
 
-Future<Map<String, dynamic>?> readJsonFile(File file) async {
+Future<Map<String, dynamic>?> readJsonFile(
+  File file, {
+  void Function(String backupPath)? onCorrupt,
+}) async {
   try {
     if (!await file.exists()) return null;
     final text = await file.readAsString();
@@ -20,10 +23,14 @@ Future<Map<String, dynamic>?> readJsonFile(File file) async {
     final decoded = jsonDecode(text);
     return decoded is Map<String, dynamic> ? decoded : null;
   } on FormatException {
-    // 坏文件不阻断启动：保留现场，让用户还能继续用（下次写入会覆盖）
+    // 坏文件不阻断启动：保留现场，并让上层把这件事告诉用户
     try {
-      await file.copy('${file.path}.broken-${DateTime.now().millisecondsSinceEpoch}');
-    } catch (_) {}
+      final backup = '${file.path}.broken-${DateTime.now().millisecondsSinceEpoch}';
+      await file.copy(backup);
+      onCorrupt?.call(backup);
+    } catch (_) {
+      onCorrupt?.call('${file.path}.broken-*');
+    }
     return null;
   }
 }

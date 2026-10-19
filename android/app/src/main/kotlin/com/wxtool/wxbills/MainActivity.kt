@@ -28,8 +28,8 @@ import java.util.concurrent.Executors
  *     逻辑与原单机版 `DateRefresher.kt` 完全一致，按代价从小到大三步走，
  *     每步都回读验证：改媒体库 date_added → 同目录重建文件 → MediaStore 插入新图。
  *
- *  3. `pickFolder` —— 桌面端用不到；Android 走 saf_util 插件，这里只是占位保证
- *     通道方法齐全（避免调用方拿到 MissingPluginException 时无提示）。
+ *  选目录不走这个通道：Android 侧直接用 saf_util 插件，这里不再留一个永远调不到的
+ *  `pickFolder` 分支（两套入口只会让人以为它们是两条生效路径）。
  */
 class MainActivity : FlutterActivity() {
 
@@ -42,7 +42,6 @@ class MainActivity : FlutterActivity() {
                 when (call.method) {
                     "readImage" -> readImage(call, result)
                     "refreshDate" -> refreshDate(call, result)
-                    "pickFolder" -> result.error("unsupported", "Android 请使用 saf_util 选择目录", null)
                     else -> result.notImplemented()
                 }
             }
@@ -215,7 +214,6 @@ class MainActivity : FlutterActivity() {
             if (updated) {
                 val added = readDate(row, MediaStore.MediaColumns.DATE_ADDED)
                 if (added >= nowSec - 3) {
-                    touchFile(uri)
                     rescan(uri, name)
                     return mapOf(
                         "ok" to true,
@@ -254,7 +252,17 @@ class MainActivity : FlutterActivity() {
         //      这条路线不需要「目录可写」，只需要我们有权创建自己的媒体记录。
         val inserted = recreateViaMediaStore(uri, name, bytes)
         if (inserted != null) {
-            val safUri = treeUri?.let { findSafDoc(it, inserted.second) } ?: inserted.first
+            // 记录里的 path 必须和扫描时 SAF 列出来的文档 URI 一致，否则下一次扫描会
+            // 认为这条记录的原文件消失了（打墓碑 + 新建一条重复记录）。
+            // 拿不到 SAF 路径就回滚这张新图、保留原图：宁可报失败，也不留半截状态。
+            val safUri = treeUri?.let { findSafDoc(it, inserted.second) }
+            if (safUri == null) {
+                runCatching { contentResolver.delete(inserted.first, null, null) }
+                return mapOf(
+                    "ok" to false,
+                    "message" to "新图已建好但无法定位到 SAF 路径，已回滚（原图未改动）",
+                )
+            }
             runCatching { DocumentsContract.deleteDocument(contentResolver, uri) }
             val id = findMediaId(inserted.second)
             val added = if (id != null) readDate(
@@ -272,8 +280,9 @@ class MainActivity : FlutterActivity() {
             )
         }
 
-        // ---- C：连新图都建不了，只能退而求其次
-        touchFile(uri)
+        // ---- C：连新图都建不了，只能如实报告失败。
+        //      绝不能为了改时间戳去 openOutputStream("wt") 重写原图：那是截断后写入，
+        //      中途失败就把用户相册里的原始凭证毁成半截文件。
         rescan(uri, name)
         val diag = buildString {
             append("全文件权限=").append(if (hasAllFiles()) "有" else "无")
@@ -294,7 +303,7 @@ class MainActivity : FlutterActivity() {
             "newUri" to uri.toString(),
             "newName" to name,
             "diagnosis" to diag,
-            "message" to "刷新失败：请确认已授予「所有文件访问权限」",
+            "message" to "刷新失败：请确认已授予「所有文件访问权限」（原图未被改动）",
         )
     }
 
@@ -494,15 +503,6 @@ class MainActivity : FlutterActivity() {
             if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else 0L
         } ?: 0L
     }.getOrDefault(0L)
-
-    /** 顺手把文件 mtime 也更新掉（有些 ROM 的相册按 mtime 排序） */
-    private fun touchFile(uri: Uri) {
-        runCatching {
-            val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                ?: return@runCatching
-            contentResolver.openOutputStream(uri, "wt")?.use { it.write(bytes) }
-        }
-    }
 
     private fun rescan(uri: Uri, name: String?) {
         val path = realPath(uri)

@@ -41,7 +41,8 @@ class ScanProgress {
 /// 与旧版的三个重要差别：
 ///  1. 主键改成跨设备稳定的 [Bill.id]（按本机路径查已有记录，不再依赖 SQLite 唯一索引）；
 ///  2. 手工确认过的金额**永不**被自动识别覆盖（原版的静默数据丢失问题）；
-///  3. 顺手生成缩略图并落盘，这样 WebDAV 同步到另一台设备也能看到图。
+///  3. 顺手生成缩略图并落盘，这样 WebDAV 同步到另一台设备也能看到图；
+///  4. 用户删掉的记录（墓碑）不会被后续扫描「复活」，列目录失败的目录也不参与清理。
 class Scanner {
   Scanner({
     required this.store,
@@ -71,20 +72,27 @@ class Scanner {
     }
 
     // 1) 列目录
+    //
+    // 按目录记录成败：列失败的目录**既不做识别、也不参与收尾清理**。
+    // 否则一次 SAF 超时 / 授权抖动，就会让这个目录下所有记录都不在「还活着」集合里，
+    // 收尾时被打成墓碑并同步出去——等于一次超时删掉整本账。
     onProgress?.call(const ScanProgress(message: '正在列目录…'));
-    final refs = <PhotoRef>[];
+    final perFolder = <String, List<PhotoRef>>{};
+    final failedFolders = <String>{};
     for (final f in folders) {
       if (_cancelled) break;
       try {
-        refs.addAll(await source.listImages(f.path, folderId: f.id));
+        perFolder[f.id] = await source.listImages(f.path, folderId: f.id);
       } catch (_) {
-        // 单个目录读不了（授权被撤销 / U 盘拔了）不能让整次扫描失败
+        failedFolders.add(f.id);
       }
     }
     // 去重（同一张图可能被多个目录包含）
     final unique = <String, PhotoRef>{};
-    for (final r in refs) {
-      unique.putIfAbsent(r.path, () => r);
+    for (final refs in perFolder.values) {
+      for (final r in refs) {
+        unique.putIfAbsent(r.path, () => r);
+      }
     }
     final all = unique.values.toList();
 
@@ -102,9 +110,11 @@ class Scanner {
       if (_cancelled) break;
       done++;
       final prev = byPath[ref.path];
+      // 用户已经显式删除过这条记录：扫描不得推翻它。
+      // 原文件还在磁盘上（删除只写墓碑），照旧重识别就会把它「复活」成正常记录。
+      if (prev != null && prev.deleted) continue;
       final unchanged = !forceRecheck &&
           prev != null &&
-          !prev.deleted &&
           prev.fileModified == ref.modified;
 
       if (unchanged) {
@@ -190,26 +200,34 @@ class Scanner {
     }
 
     // 3) 清理已从磁盘消失的文件（软删除，让删除能同步出去）
-    final alive = all.map((r) => r.path).toSet();
-    final now = DateTime.now().millisecondsSinceEpoch;
-    for (final b in store.allIncludingDeleted.toList()) {
-      if (b.deleted || b.path.isEmpty) continue;
-      if (alive.contains(b.path)) continue;
-      final folder = store.folderOf(b);
-      if (folder == null) continue;
-      // 目录不可访问时不要误删（例如拔了 U 盘、撤了授权）
-      if (!await source.folderExists(folder.path)) continue;
-      store.put(b.copyWith(deleted: true, updatedAt: now));
+    //
+    // 三个前提全部满足才允许打墓碑：目录列成功、记录属于本机某个目录、目录当前可访问。
+    // 中途被取消时整段跳过（列表可能是半截的）。
+    if (!_cancelled) {
+      final alive = all.map((r) => r.path).toSet();
+      final now = DateTime.now().millisecondsSinceEpoch;
+      for (final b in store.allIncludingDeleted.toList()) {
+        if (b.deleted || b.path.isEmpty) continue;
+        if (alive.contains(b.path)) continue;
+        final folder = store.folderOf(b);
+        if (folder == null) continue;
+        if (failedFolders.contains(folder.id)) continue;
+        if (!await source.folderExists(folder.path)) continue;
+        store.put(b.copyWith(deleted: true, updatedAt: now));
+      }
     }
 
     for (final f in folders) {
       store.touchFolder(f.id, DateTime.now().millisecondsSinceEpoch);
     }
+    // 墓碑会随同步一直传下去，但不必永久保留：清掉过期的，快照才不会被历史撑大。
+    store.purgeTombstones();
     await store.save();
     await store.pruneThumbs();
 
     final msg = '共 ${all.length} 张，更新 $updated 张'
-        '${failed > 0 ? '，$failed 张未识别' : ''}';
+        '${failed > 0 ? '，$failed 张未识别' : ''}'
+        '${failedFolders.isEmpty ? '' : '（${failedFolders.length} 个目录读取失败，已跳过清理）'}';
     final result = ScanProgress(
       total: all.length,
       done: done,
@@ -237,9 +255,8 @@ class Scanner {
       if (ocr != null) {
         final r = AmountReader.read(ocr.rgba, ocr.width, ocr.height);
         confidence = r.confidence;
-        final v = r.value;
         // 认出来就记下来：置信度不够的由界面标「待核对」，不丢数据
-        if (v != null) cents = (v * 100).round();
+        cents = Bill.centsFromYuan(r.value);
       }
     } catch (_) {
       // 单张失败不影响整批

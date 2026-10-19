@@ -49,7 +49,7 @@ abstract class PhotoSource {
   /// 选一个目录，返回 (本机路径, 展示名)。用户取消返回 null。
   Future<({String path, String name})?> pickFolder();
 
-  /// 递归列出目录下的图片（最多 2 层子目录，与原版一致）。
+  /// 递归列出目录下的图片（最深 2 层子目录，与原版一致）。
   Future<List<PhotoRef>> listImages(String folderPath, {String folderId = ''});
 
   /// 读出用于 OCR 的像素图（已按需下采样，最长边约 [maxDim]）。
@@ -342,18 +342,11 @@ class DesktopPhotoSource implements PhotoSource {
   }
 
   @override
-  Future<RefreshOutcome> refreshDate(String path, String? folderPath) async {
-    try {
-      final f = File(path);
-      if (!await f.exists()) {
-        return const RefreshOutcome(ok: false, message: '文件不存在');
-      }
-      await f.setLastModified(DateTime.now());
-      return const RefreshOutcome(ok: true, message: '已更新文件修改时间');
-    } catch (e) {
-      return RefreshOutcome(ok: false, message: '刷新失败：$e');
-    }
-  }
+  Future<RefreshOutcome> refreshDate(String path, String? folderPath) async =>
+      const RefreshOutcome(
+        ok: false,
+        message: '桌面端没有「相册入库时间」这个概念，无需刷新（Android 专属功能）',
+      );
 }
 
 /// 把 RGBA 像素图编码成 JPEG（Android 侧兜底用）。

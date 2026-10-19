@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../data/store.dart';
+import '../../model/bill.dart';
 import '../app_controller.dart';
 import '../theme.dart';
 import '../widgets/ui_kit.dart';
@@ -370,7 +371,7 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           const SizedBox(height: 10),
           _kv('记录数', '${store.count} 条'),
-          _kv('合计金额', '¥${_fmtCents(store.sumCents)}'),
+          _kv('合计金额', '¥${Bill.formatCents(store.sumCents)}'),
           _kv('待核对', '${store.reviewCount} 条'),
           _kv('数据文件', store.dirs.dataFile.path),
           const SizedBox(height: 10),
@@ -401,12 +402,6 @@ class _SettingsPageState extends State<SettingsPage> {
           ],
         ),
       );
-
-  static String _fmtCents(int cents) {
-    final yuan = cents ~/ 100;
-    final fen = cents % 100;
-    return fen == 0 ? '$yuan' : '$yuan.${fen.toString().padLeft(2, '0')}';
-  }
 
   static String _ago(int ms) {
     final d = DateTime.now().difference(DateTime.fromMillisecondsSinceEpoch(ms));

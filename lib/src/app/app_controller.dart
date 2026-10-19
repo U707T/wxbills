@@ -69,18 +69,32 @@ class AppController extends ChangeNotifier {
 
   Timer? _autoSyncTimer;
 
+  /// 扫描 / 同步互斥：有任务在跑时，后到的请求排队而不是被静默丢弃。
+  bool _syncQueued = false;
+
+  /// 用户点了「停止」。扫描在识别循环里检查，刷新日期在批处理里检查。
+  bool _cancelRequested = false;
+
+  /// 当前正在跑的是扫描 / 刷新日期（决定界面上要不要显示「停止」）。
+  bool _scanning = false;
+  bool _refreshing = false;
+  bool get cancellable => _scanning || _refreshing;
+
   // ---------------------------------------------------------------- 初始化
 
   Future<void> init() async {
     await store.load();
     _ready = true;
     notifyListeners();
+    if (store.loadWarning.isNotEmpty) showToast(store.loadWarning);
 
     // 首次进入：没有目录就提示导入；有目录就静默增量扫描
     if (store.folders.isEmpty) return;
-    unawaited(scan(force: false, silent: true));
+    // 先扫描、再同步：scan / runSync 共用一个 _busy 守卫，同时发起会让后一个
+    // 静默返回（这正是「启动自动同步从来没执行过」的原因）。
+    await scan(force: false, silent: true);
     if (store.sync.configured && store.sync.autoSync) {
-      unawaited(runSync(silent: true));
+      await runSync(silent: true);
     }
   }
 
@@ -91,18 +105,15 @@ class AppController extends ChangeNotifier {
   /// 当前筛选 + 排序后的列表。
   List<Bill> get visibleBills {
     final q = _query.trim();
-    var list = store.bills;
+    var list = store.liveBills;
 
     if (q.isNotEmpty) {
       final cents = Bill.parseYuan(q);
       if (cents != null) {
-        // 输入金额：包含该金额的排前面（按金额位置快速滑动）
-        final digits = q.replaceAll('.', '').replaceAll(RegExp(r'^0+'), '');
-        final key = digits.isEmpty ? '0' : digits;
-        final hit = list
-            .where((b) => b.amountCents != null && '${b.amountCents}'.contains(key))
-            .toList();
-        if (hit.isNotEmpty) list = hit;
+        // 输入的是金额：只保留完全相同的记录；一个都没有时保留全部，
+        // 让「定位」按「最接近」跳过去——两处语义必须一致，别一个筛选一个取近。
+        final exact = list.where((b) => b.amountCents == cents).toList();
+        if (exact.isNotEmpty) list = exact;
       } else {
         final lower = q.toLowerCase();
         list = list.where((b) {
@@ -267,11 +278,16 @@ class AppController extends ChangeNotifier {
   // ---------------------------------------------------------------- 扫描
 
   Future<void> scan({bool force = false, bool silent = false}) async {
-    if (_busy) return;
+    if (_busy) {
+      if (!silent) showToast('正在忙，稍后再试');
+      return;
+    }
     if (store.folders.isEmpty) {
       if (!silent) showToast('先导入一个相册文件夹');
       return;
     }
+    _cancelRequested = false;
+    _scanning = true;
     _setBusy(true, force ? '重新识别全部…' : '正在识别金额…', 0);
     try {
       final result = await scanner.scanAll(
@@ -292,7 +308,18 @@ class AppController extends ChangeNotifier {
     } catch (e) {
       _setBusy(false, '', 0);
       showToast('扫描失败：$e');
+    } finally {
+      _scanning = false;
+      _flushQueuedSync();
     }
+  }
+
+  /// 扫描期间被拒绝的同步请求，在这里补跑（不能直接丢，否则「启动 / 修改后自动同步」失效）。
+  void _flushQueuedSync() {
+    if (!_syncQueued) return;
+    _syncQueued = false;
+    if (!store.sync.configured) return;
+    unawaited(runSync(silent: true));
   }
 
   Future<void> recheckOne(String id) async {
@@ -306,7 +333,7 @@ class AppController extends ChangeNotifier {
         showToast('这张没认出来，请手动填写金额');
         return;
       }
-      final cents = r.value == null ? null : (r.value! * 100).round();
+      final cents = Bill.centsFromYuan(r.value);
       store.setAmount(id, cents);
       notifyListeners();
       await _persist();
@@ -327,11 +354,18 @@ class AppController extends ChangeNotifier {
       return;
     }
     if (list.isEmpty) return;
+    if (_busy) {
+      showToast('正在忙，稍后再试');
+      return;
+    }
+    _cancelRequested = false;
+    _refreshing = true;
     _setBusy(true, '正在刷新日期…', 0);
     var ok = 0;
     var fail = 0;
-    String? firstError;
+    final failures = <String>[];
     for (var i = 0; i < list.length; i++) {
+      if (_cancelRequested) break;
       final b = list[i];
       if (b.path.isEmpty) {
         fail++;
@@ -350,16 +384,24 @@ class AppController extends ChangeNotifier {
         }
       } else {
         fail++;
-        if (r.message.isNotEmpty) firstError ??= r.message;
-        if (r.diagnosis.isNotEmpty) firstError ??= r.diagnosis;
+        if (failures.length < 3) {
+          final reason = r.message.isNotEmpty ? r.message : r.diagnosis;
+          failures.add(reason.isEmpty ? b.name : '${b.name}：$reason');
+        }
       }
+      // 每 10 张落一次盤：中途被杀时已回写的 path 不能丢，否则下次扫描会把
+      // 这些记录当成「文件已消失」而打墓碑。
+      if (i % 10 == 9) await store.save();
       _setBusy(true, '刷新 ${i + 1}/${list.length}', (i + 1) / list.length);
     }
+    _refreshing = false;
     await store.save();
     _setBusy(false, '', 0);
     notifyListeners();
-    final err = fail > 0 && firstError != null ? '（$firstError）' : '';
-    showToast('已刷新 $ok 张${fail > 0 ? '，$fail 张失败' : ''}$err');
+    final stopped = _cancelRequested && ok + fail < list.length;
+    final detail = failures.isEmpty ? '' : '（${failures.join('；')}）';
+    showToast('已刷新 $ok 张${fail > 0 ? '，$fail 张失败' : ''}'
+        '${stopped ? '，已停止' : ''}$detail');
   }
 
   // ---------------------------------------------------------------- 同步
@@ -376,11 +418,17 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> runSync({bool silent = false}) async {
-    if (_busy) return;
+    if (_busy) {
+      // 扫描/刷新在跑：记下来，等它结束补跑，别把「自动同步」悄悄丢掉
+      _syncQueued = true;
+      if (!silent) showToast('正在忙，稍后自动同步');
+      return;
+    }
     if (!store.sync.configured) {
       if (!silent) showToast('先在设置里填写 WebDAV 地址');
       return;
     }
+    _syncQueued = false;
     _setBusy(true, '同步中…', 0);
     try {
       final result = await sync.run(onProgress: (p) {
@@ -405,6 +453,15 @@ class AppController extends ChangeNotifier {
   }
 
   // ---------------------------------------------------------------- 小工具
+
+  /// 用户点「停止」：扫描会尽快收尾（已识别的会落盘），刷新日期在下一张前停。
+  /// 同步不支持中断（一次 PUT 很快，打断反而可能留下半截状态）。
+  void cancelBusy() {
+    if (!_busy) return;
+    _cancelRequested = true;
+    scanner.cancel();
+    showToast(_scanning ? '正在停止扫描…' : '正在停止…');
+  }
 
   void showToast(String message) {
     _toast = message;

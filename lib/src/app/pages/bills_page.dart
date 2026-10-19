@@ -57,22 +57,48 @@ class _BillsPageState extends State<BillsPage> {
     final id = c.locateByAmount(_searchCtrl.text);
     if (id == null) return;
     FocusScope.of(context).unfocus();
-    // 等一帧，让列表按筛选结果重建后再滚
-    await Future<void>.delayed(const Duration(milliseconds: 40));
+    // 等一帧，让列表按新的筛选结果重建
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted || !_scrollCtrl.hasClients) return;
+
+    final bills = c.visibleBills;
+    final index = bills.indexWhere((b) => b.id == id);
+    if (index < 0) return;
+
+    // 第一段：按「下标 × 行高」直接跳过去。
+    // 不能依赖 GlobalKey 的 context——ListView 是懒构建的，屏外 item 根本没有
+    // context，旧实现的兜底是 animateTo(0)，于是「定位」变成了「跳回顶部」。
+    final extent = _tileExtent();
+    final target =
+        (index * extent).clamp(0.0, _scrollCtrl.position.maxScrollExtent);
+    await _scrollCtrl.animateTo(target,
+        duration: const Duration(milliseconds: 260), curve: Curves.easeOutCubic);
     if (!mounted) return;
-    final key = _itemKeys[id];
-    final ctx = key?.currentContext;
+
+    // 第二段：目标已进入视口附近，它的 key 这时才构建出来，做一次精确对齐。
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted) return;
+    final ctx = _itemKeys[id]?.currentContext;
     if (ctx != null && ctx.mounted) {
       await Scrollable.ensureVisible(
         ctx,
-        duration: const Duration(milliseconds: 260),
+        duration: const Duration(milliseconds: 160),
         alignment: 0.25,
         curve: Curves.easeOutCubic,
       );
-    } else if (_scrollCtrl.hasClients) {
-      _scrollCtrl.animateTo(0,
-          duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
     }
+  }
+
+  /// 单条记录占的高度：卡片（缩略图 58 + 上下内边距 20）+ 间隔 8。
+  /// 优先量已经渲染出来的卡片，量不到再退回常量。
+  double _tileExtent() {
+    for (final key in _itemKeys.values) {
+      final box = key.currentContext?.findRenderObject();
+      if (box is RenderBox && box.hasSize && box.size.height > 0) {
+        return box.size.height + 8;
+      }
+    }
+    return 86;
   }
 
   // ---------------------------------------------------------------- 编辑
@@ -83,11 +109,16 @@ class _BillsPageState extends State<BillsPage> {
       builder: (_) => _AmountDialog(bill: bill),
     );
     if (result == null) return;
-    if (result.cents == null) {
+    if (result.kind == _EditKind.invalid) {
       c.showToast('金额格式不对');
       return;
     }
-    c.setAmount(bill.id, result.cents, note: result.note);
+    // cleared = 撤回这次识别，回到「未识别」；value = 正常落盘
+    c.setAmount(
+      bill.id,
+      result.kind == _EditKind.cleared ? null : result.cents,
+      note: result.note,
+    );
   }
 
   Future<void> _confirmRefresh(List<Bill> list) async {
@@ -123,7 +154,9 @@ class _BillsPageState extends State<BillsPage> {
   @override
   Widget build(BuildContext context) {
     final bills = c.visibleBills;
-    _itemKeys.removeWhere((id, _) => !bills.any((b) => b.id == id));
+    // 用 Set 做差集，别在 removeWhere 里对每个 key 再遍历一遍列表（O(n²)）
+    final visibleIds = {for (final b in bills) b.id};
+    _itemKeys.removeWhere((id, _) => !visibleIds.contains(id));
     for (final b in bills) {
       _itemKeys.putIfAbsent(b.id, () => GlobalKey());
     }
@@ -149,7 +182,11 @@ class _BillsPageState extends State<BillsPage> {
         ),
         _toolbar(),
         if (c.busy)
-          BusyBar(label: c.busyLabel, fraction: c.busyFraction),
+          BusyBar(
+            label: c.busyLabel,
+            fraction: c.busyFraction,
+            onCancel: c.cancellable ? c.cancelBusy : null,
+          ),
         Expanded(
           child: bills.isEmpty
               ? EmptyHint(
@@ -350,8 +387,20 @@ class _BillsPageState extends State<BillsPage> {
 }
 
 /// 编辑金额/备注的对话框结果。
+enum _EditKind {
+  /// 用户把金额清空了：回到「未识别」。
+  cleared,
+
+  /// 合法金额。
+  value,
+
+  /// 文本解析不出金额（提示格式错误，不落盘）。
+  invalid,
+}
+
 class _EditResult {
-  const _EditResult(this.cents, this.note);
+  const _EditResult(this.kind, this.cents, this.note);
+  final _EditKind kind;
   final int? cents;
   final String note;
 }
@@ -387,9 +436,16 @@ class _AmountDialogState extends State<_AmountDialog> {
   }
 
   void _submit() {
+    final raw = _amount.text.trim();
+    final note = _note.text.trim();
+    if (raw.isEmpty) {
+      Navigator.pop(context, _EditResult(_EditKind.cleared, null, note));
+      return;
+    }
+    final cents = Bill.parseYuan(raw);
     Navigator.pop(
       context,
-      _EditResult(Bill.parseYuan(_amount.text), _note.text.trim()),
+      _EditResult(cents == null ? _EditKind.invalid : _EditKind.value, cents, note),
     );
   }
 

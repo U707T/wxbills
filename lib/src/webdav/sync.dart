@@ -62,8 +62,9 @@ class SyncResult {
 /// 重新下载 → 重新合并 → 再写，不会互相覆盖。这比自造增量日志简单可靠得多。
 ///
 /// ## 合并规则
-/// 同一 id 取 `updatedAt` 更新的那条（LWW），平手时见 [mergeBill]；
-/// 删除是墓碑（`deleted=1`），所以「A 删、B 改」也能收敛，不会复活。
+/// 同一 id 先看删除：任一端删除即删除胜（见 [mergeBill]），避免「删了又回来」；
+/// 都没删时取 `updatedAt` 更新的那条。删除是墓碑（`deleted=1`），所以
+/// 「A 删、B 改」一定收敛到已删除，不会复活。
 class SyncEngine {
   SyncEngine(this.store, {this.deviceName = ''});
 
@@ -285,7 +286,14 @@ class SyncEngine {
         } on WebDavException {
           // 单张失败不影响整体
         }
-      } else if (remoteEntry == null) {
+      } else {
+        // 远端没有 → 补传；远端有但字节数不同 → 覆盖（缩略图文件名固定是
+        // `<id>.jpg`，「重新识别全部」换了内容后只有靠长度才能发现不一致）。
+        // 服务端没给 content-length（size < 0）时无法判断，宁可不动，避免每轮都写。
+        final missing = remoteEntry == null;
+        final changed =
+            remoteEntry != null && remoteEntry.size >= 0 && remoteEntry.size != local.length;
+        if (!missing && !changed) continue;
         try {
           await client.put(
             '$base/${WebDavClient.encodeSegment(b.thumb)}',
