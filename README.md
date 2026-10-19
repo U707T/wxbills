@@ -67,7 +67,7 @@
 export PATH=/opt/flutter/bin:$PATH
 flutter pub get
 flutter analyze
-flutter test                      # 50 项：OCR 回归 / 同步端到端 / 存储 / 扫描 / UI / 回归
+flutter test                      # 56 项：OCR 回归 / 同步端到端 / 存储 / 扫描 / UI / 回归
 flutter build apk --debug --target-platform=android-arm64
 ```
 
@@ -76,6 +76,8 @@ flutter build apk --debug --target-platform=android-arm64
 | 测试文件 | 覆盖内容 |
 |---------|---------|
 | `test/amount_reader_test.dart` | 18 张真实收款单 + 50% 缩图 + 空白图 |
+| `test/ocr_layout_test.dart` | 金额不在固定高度（状态栏 / 长截图）也要认得出 |
+| `test/recognition_retry_test.dart` | 未识别记录会重试、静默扫描不重试、手工金额不被覆盖 |
 | `test/sync_test.dart` | 首次上传 / 拉取 / 双向修改 / 删除同步 / ETag 冲突重试 / 401 / 500 / 远端损坏 / 缩略图 |
 | `test/store_test.dart` | 金额格式化、合并交换律、原子写、坏文件恢复、墓碑清理 |
 | `test/scanner_test.dart` | 增量扫描、手工金额不被覆盖、删除留墓碑、跨设备记录不误删 |
@@ -116,6 +118,7 @@ android/app/src/main/kotlin/…  MainActivity：下采样解码 + 刷新图片�
 
 ## 说明
 
-- 识别算法只针对微信收款单的固定版式（顶部绿底 + 白色卡片 + `¥ XX.XX`）。
-  其他版式的截图需要调整模板或采样区域。
+- 识别算法只针对微信收款单的版式（顶部绿底 + 白色卡片 + `¥ XX.XX`）：
+  金额所在高度不再写死，截图带状态栏 / 长截图也能认；但**其他 App 的付款截图**
+  或整段聊天记录截图仍需要调整字形模板。
 - 本应用不收集、不上传任何图片；同步只把你自己的记录与缩略图写到你自己的网盘。
