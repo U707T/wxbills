@@ -68,7 +68,7 @@
 export PATH=/opt/flutter/bin:$PATH
 flutter pub get
 flutter analyze
-flutter test                      # 71 项：OCR 回归 / 同步端到端 / 存储 / 扫描 / UI / 回归
+flutter test                      # 70 项：OCR 回归 / 同步端到端 / 存储 / 扫描 / UI / 回归
 flutter build apk --debug --target-platform=android-arm64
 ```
 
