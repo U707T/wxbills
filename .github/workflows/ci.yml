@@ -108,6 +108,24 @@ jobs:
               sys.exit(1)
           print('16KB 兼容检查通过')
           PY
+      # 配了签名 secrets 却仍产出 debug 签名，说明 key.properties 没生效 ——
+      # 这种包装到用户手机上会和旧版签名冲突（必须先卸载），必须拦住。
+      - name: Verify release signature is not debug
+        env:
+          HAS_KEY: ${{ secrets.KEYSTORE }}
+        run: |
+          if [ -z "$HAS_KEY" ]; then
+            echo "::notice::未配置签名 secrets，跳过签名校验（debug 签名）"
+            exit 0
+          fi
+          BT=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)
+          "$ANDROID_HOME/build-tools/$BT/apksigner" verify --print-certs \
+            WxBills-release-arm64-v8a.apk > certs.txt
+          cat certs.txt
+          if grep -q "CN=Android Debug" certs.txt; then
+            echo "::error::release APK 仍是 debug 签名，key.properties 没有生效"
+            exit 1
+          fi
       # 关键权限必须存在（缺 INTERNET 同步直接废掉；缺 MANAGE_EXTERNAL_STORAGE 刷新日期失效）
       - name: Verify manifest permissions
         run: |
