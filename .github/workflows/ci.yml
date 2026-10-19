@@ -8,6 +8,11 @@ on:
     paths-ignore: [ 'README.md', 'LICENSE' ]
   workflow_dispatch:
 
+# 版本号只写一次：测试、Android、Windows 三个 job 必须用同一个 Flutter，
+# 否则会出现「测试跑的是 A、发布用的是 B」。
+env:
+  FLUTTER_VERSION: 3.47.5
+
 jobs:
   # ---------------------------------------------------------------- 测试
   test:
@@ -17,7 +22,7 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
-          flutter-version: 3.47.5
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
       - name: Get dependencies
         run: flutter pub get
@@ -36,7 +41,7 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
-          flutter-version: 3.47.5
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
       - uses: actions/setup-java@v4
         with:
@@ -152,7 +157,7 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
-          flutter-version: 3.47.5
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           cache: true
       - name: Get dependencies
         run: flutter pub get
@@ -183,7 +188,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Get version
         id: yq
-        uses: mikefarah/yq@master
+        uses: mikefarah/yq@v4.44.3
         with:
           cmd: yq '.version' 'pubspec.yaml'
       - name: Prepare tag name
