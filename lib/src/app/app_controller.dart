@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
+import '../ocr/amount_reader.dart';
+
 import '../data/app_dirs.dart';
 import '../data/scanner.dart';
 import '../data/store.dart';
@@ -74,6 +76,10 @@ class AppController extends ChangeNotifier {
 
   /// 用户点了「停止」。扫描在识别循环里检查，刷新日期在批处理里检查。
   bool _cancelRequested = false;
+
+  /// 最近一次扫描的结果文案（不落盘，只给界面和诊断用）。
+  String _lastScanMessage = '';
+  String get lastScanMessage => _lastScanMessage;
 
   /// 当前正在跑的是扫描 / 刷新日期（决定界面上要不要显示「停止」）。
   bool _scanning = false;
@@ -303,6 +309,7 @@ class AppController extends ChangeNotifier {
           }
         },
       );
+      _lastScanMessage = result.message;
       _setBusy(false, '', 0);
       notifyListeners();
       if (!silent || result.updated > 0) showToast(result.message);
@@ -459,6 +466,42 @@ class AppController extends ChangeNotifier {
     _autoSyncTimer = Timer(const Duration(seconds: 8), () {
       unawaited(runSync(silent: true));
     });
+  }
+
+  // ---------------------------------------------------------------- 诊断
+
+  /// 识别诊断：把「读图 → 解码 → 识别」的中间结果摊开。
+  ///
+  /// 扫描只会在任一步失败时把记录留成「未识别」，界面上看不出卡在哪；
+  /// 这里用第一条记录跑一遍并逐段报告，结果可以直接复制贴出来。
+  Future<String> diagnoseRecognition() async {
+    final buf = StringBuffer();
+    buf.writeln('平台：${Platform.operatingSystem}');
+    buf.writeln('目录：${store.folders.isEmpty ? '（未导入）' : store.folders.map((f) => f.isSaf ? 'SAF' : f.path).join(' / ')}');
+    buf.writeln('最近扫描：${_lastScanMessage.isEmpty ? '（还没扫过）' : _lastScanMessage}');
+    final bill = store.bills.isEmpty ? null : store.bills.first;
+    if (bill == null) {
+      buf.writeln('没有记录可诊断：先导入文件夹并扫描一次');
+      return buf.toString();
+    }
+    buf.writeln('样本：${bill.name}');
+    buf.writeln('路径：${bill.path}');
+    try {
+      final ocr = await source.loadForOcr(bill.path);
+      if (ocr == null) {
+        final err = source.loadError;
+        buf.writeln('读图失败：${err.isEmpty ? '未知原因（没读到像素）' : err}');
+      } else {
+        buf.writeln('读图成功：${ocr.width}x${ocr.height}');
+        final r = AmountReader.read(ocr.rgba, ocr.width, ocr.height);
+        buf.writeln('识别结果：${r.text ?? '（空）'}　置信度 ${(r.confidence * 100).toStringAsFixed(1)}%');
+      }
+      final thumb = await source.makeThumbBytes(bill.path);
+      buf.writeln('缩略图：${thumb == null ? '失败' : '${thumb.length} 字节'}');
+    } catch (e) {
+      buf.writeln('异常：$e');
+    }
+    return buf.toString();
   }
 
   // ---------------------------------------------------------------- 小工具

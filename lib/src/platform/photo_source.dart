@@ -46,6 +46,10 @@ abstract class PhotoSource {
   /// 是否支持「刷新图片入库时间」（让 QQ / 相册把旧图当新图）。
   bool get supportsRefreshDate;
 
+  /// 最后一次读图失败的原因（成功时为空）。界面「识别诊断」会显示它，
+  /// 不再把「图都读不出来」和「认不出金额」混成同一个「未识别」。
+  String get loadError;
+
   /// 选一个目录，返回 (本机路径, 展示名)。用户取消返回 null。
   Future<({String path, String name})?> pickFolder();
 
@@ -63,6 +67,39 @@ abstract class PhotoSource {
 
   /// 目录是否仍然可访问。
   Future<bool> folderExists(String folderPath);
+}
+
+/// 从图片字节解码出 OCR 用的 RGBA 像素图（纯 Dart）。
+///
+/// 两个平台共用：Windows 直接走它；Android 在「原生下采样解码」失败时
+/// 作为第二路线（原生只负责把原文件字节取回来）。多一条兜底，就不至于
+/// 因为一处解码失败让整本账显示成「未识别」。
+img.Image? decodeImageScaled(Uint8List bytes, int maxDim) {
+  try {
+    final decoded = img.decodeImage(bytes);
+    if (decoded == null) return null;
+    final longest =
+        decoded.width > decoded.height ? decoded.width : decoded.height;
+    if (longest <= maxDim) return decoded;
+    return img.copyResize(
+      decoded,
+      width: (decoded.width * maxDim / longest).round(),
+      height: (decoded.height * maxDim / longest).round(),
+      interpolation: img.Interpolation.average,
+    );
+  } catch (_) {
+    return null;
+  }
+}
+
+OcrImage? decodeBytesForOcr(Uint8List bytes, {int maxDim = 1600}) {
+  final scaled = decodeImageScaled(bytes, maxDim);
+  if (scaled == null) return null;
+  return OcrImage(
+    scaled.getBytes(order: img.ChannelOrder.rgba),
+    scaled.width,
+    scaled.height,
+  );
 }
 
 /// 刷新日期的结果。
@@ -103,6 +140,11 @@ class AndroidPhotoSource implements PhotoSource {
 
   final SafUtil _saf;
   static const MethodChannel _scan = MethodChannel('wxbills/scan');
+
+  String _loadError = '';
+
+  @override
+  String get loadError => _loadError;
 
   @override
   bool get supportsRefreshDate => true;
@@ -162,20 +204,56 @@ class AndroidPhotoSource implements PhotoSource {
 
   @override
   Future<OcrImage?> loadForOcr(String path, {int maxDim = 1600}) async {
+    // 路线 A：原生侧按 inSampleSize 下采样解码（最快、最省内存）
     try {
       final raw = await _scan.invokeMethod<Map<Object?, Object?>>(
         'readImage',
         {'uri': path, 'maxDim': maxDim},
       );
-      if (raw == null) return null;
-      final bytes = raw['bytes'];
-      final w = (raw['width'] as num?)?.toInt() ?? 0;
-      final h = (raw['height'] as num?)?.toInt() ?? 0;
-      if (bytes is! Uint8List || w <= 0 || h <= 0) return null;
-      return OcrImage(bytes, w, h);
-    } on PlatformException {
+      if (raw == null) {
+        _loadError = '原生解码返回 null（BitmapFactory 解不了这个文件）';
+      } else {
+        final bytes = raw['bytes'];
+        final w = (raw['width'] as num?)?.toInt() ?? 0;
+        final h = (raw['height'] as num?)?.toInt() ?? 0;
+        if (bytes is Uint8List && w > 0 && h > 0) {
+          _loadError = '';
+          return OcrImage(bytes, w, h);
+        }
+        _loadError = '原生解码返回的数据不完整（${bytes.runtimeType} ${w}x$h）';
+      }
+    } on PlatformException catch (e) {
+      _loadError = '原生解码失败：${e.code}${e.message == null ? '' : ' ${e.message}'}';
+    } on MissingPluginException {
+      _loadError = '平台通道 wxbills/scan 未注册';
+    } catch (e) {
+      _loadError = '原生解码异常：$e';
+    }
+
+    // 路线 B：只让原生把原文件字节取回来，Dart 侧自己解码。
+    // 这条路线不碰 BitmapFactory，也不依赖通道返回位图，是 A 失败时的兜底。
+    try {
+      final bytes = await _scan.invokeMethod<Uint8List>('readBytes', {'uri': path});
+      if (bytes == null || bytes.isEmpty) {
+        _loadError = '$_loadError；读取文件字节失败';
+        return null;
+      }
+      final ocr = decodeBytesForOcr(bytes, maxDim: maxDim);
+      if (ocr == null) {
+        _loadError = '$_loadError；Dart 侧解码失败（${bytes.length} 字节）';
+        return null;
+      }
+      // 路线 B 成功：把 A 的错误降级成提示，不当失败处理
+      _loadError = '';
+      return ocr;
+    } on PlatformException catch (e) {
+      _loadError = '$_loadError；读取文件字节失败：${e.message ?? e.code}';
       return null;
     } on MissingPluginException {
+      _loadError = '$_loadError；读取文件字节失败：通道未注册';
+      return null;
+    } catch (e) {
+      _loadError = '$_loadError；读取文件字节异常：$e';
       return null;
     }
   }
@@ -307,36 +385,34 @@ class DesktopPhotoSource implements PhotoSource {
     }
   }
 
-  @override
-  Future<OcrImage?> loadForOcr(String path, {int maxDim = 1600}) async {
-    final decoded = await _decodeFile(path, maxDim);
-    if (decoded == null) return null;
-    return OcrImage(decoded.getBytes(order: img.ChannelOrder.rgba),
-        decoded.width, decoded.height);
-  }
+  String _loadError = '';
 
-  Future<img.Image?> _decodeFile(String path, int maxDim) async {
+  @override
+  String get loadError => _loadError;
+
+  Future<Uint8List?> _readBytes(String path) async {
     try {
-      final bytes = await File(path).readAsBytes();
-      final decoded = img.decodeImage(bytes);
-      if (decoded == null) return null;
-      final longest = decoded.width > decoded.height ? decoded.width : decoded.height;
-      if (longest <= maxDim) return decoded;
-      final scale = maxDim / longest;
-      return img.copyResize(
-        decoded,
-        width: (decoded.width * scale).round(),
-        height: (decoded.height * scale).round(),
-        interpolation: img.Interpolation.average,
-      );
-    } catch (_) {
+      return await File(path).readAsBytes();
+    } catch (e) {
+      _loadError = '读取文件失败：$e';
       return null;
     }
   }
 
   @override
+  Future<OcrImage?> loadForOcr(String path, {int maxDim = 1600}) async {
+    final bytes = await _readBytes(path);
+    if (bytes == null) return null;
+    final ocr = decodeBytesForOcr(bytes, maxDim: maxDim);
+    _loadError = ocr == null ? '图片解码失败（${bytes.length} 字节）' : '';
+    return ocr;
+  }
+
+  @override
   Future<Uint8List?> makeThumbBytes(String path, {int maxDim = 256}) async {
-    final decoded = await _decodeFile(path, maxDim);
+    final bytes = await _readBytes(path);
+    if (bytes == null) return null;
+    final decoded = decodeImageScaled(bytes, maxDim);
     if (decoded == null) return null;
     return Uint8List.fromList(img.encodeJpg(decoded, quality: 82));
   }

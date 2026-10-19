@@ -16,6 +16,9 @@ class StubPhotoSource implements PhotoSource {
   bool get supportsRefreshDate => true;
 
   @override
+  String get loadError => '';
+
+  @override
   Future<({String path, String name})?> pickFolder() async => null;
 
   @override

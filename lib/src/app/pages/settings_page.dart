@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../data/store.dart';
 import '../../model/bill.dart';
@@ -25,6 +26,8 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _testing = false;
   String _testResult = '';
   bool _showPass = false;
+  bool _diagnosing = false;
+  String _diagnosis = '';
 
   AppController get c => widget.controller;
 
@@ -103,6 +106,8 @@ class _SettingsPageState extends State<SettingsPage> {
                   _syncCard(cfg),
                   const SizedBox(height: 12),
                   _foldersCard(),
+                  const SizedBox(height: 12),
+                  _diagnoseCard(),
                   const SizedBox(height: 12),
                   _aboutCard(),
                 ],
@@ -353,6 +358,86 @@ class _SettingsPageState extends State<SettingsPage> {
       ),
     );
     if (ok == true) await c.removeFolder(id);
+  }
+
+  Future<void> _diagnose() async {
+    setState(() {
+      _diagnosing = true;
+      _diagnosis = '';
+    });
+    final text = await c.diagnoseRecognition();
+    if (!mounted) return;
+    setState(() {
+      _diagnosing = false;
+      _diagnosis = text;
+    });
+  }
+
+  /// 识别诊断：扫描后仍是「未识别」时，用它看清卡在读图、解码还是识别。
+  Widget _diagnoseCard() {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    return AppCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.biotech_outlined, size: 18, color: Palette.green),
+              SizedBox(width: 8),
+              Text('识别诊断',
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+            ],
+          ),
+          const SizedBox(height: 6),
+          const Text(
+            '扫描后仍是「未识别」时，点下面用第一条记录跑一遍，'
+            '看清是读图失败、解码失败，还是识别不出金额。结果可直接复制。',
+            style: TextStyle(fontSize: 12, height: 1.55, color: Palette.textDim),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: ActionButton(
+                  icon: Icons.play_circle_outline,
+                  label: '诊断第一张图',
+                  busy: _diagnosing,
+                  onPressed: _diagnose,
+                ),
+              ),
+              if (_diagnosis.isNotEmpty) ...[
+                const SizedBox(width: 8),
+                Expanded(
+                  child: ActionButton(
+                    icon: Icons.copy_all_outlined,
+                    label: '复制结果',
+                    onPressed: () async {
+                      await Clipboard.setData(ClipboardData(text: _diagnosis));
+                      c.showToast('诊断结果已复制');
+                    },
+                  ),
+                ),
+              ],
+            ],
+          ),
+          if (_diagnosis.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: dark ? const Color(0xFF262A2C) : const Color(0xFFF4F6F7),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: SelectableText(
+                _diagnosis,
+                style: const TextStyle(fontSize: 11.5, height: 1.55),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
   }
 
   Widget _aboutCard() {

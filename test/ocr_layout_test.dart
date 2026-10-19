@@ -3,7 +3,9 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:image/image.dart' as img;
 import 'package:wxbills/src/ocr/amount_reader.dart';
+import 'package:wxbills/src/platform/photo_source.dart';
 
 /// 样图格式：int32 width, int32 height, 然后 width*height 个 ARGB int（大端）。
 class _Sample {
@@ -75,5 +77,31 @@ void main() {
     final blank = Uint8List(w * h * 4)..fillRange(0, w * h * 4, 255);
     final r = AmountReader.read(blank, w, h);
     expect(r.text, isNull);
+  });
+
+  // Android 的第二条读图路线（原生只回原始字节、Dart 自己解码）走的就是
+  // decodeBytesForOcr。这条测试保证它和桌面路径给出相同的识别结果。
+  test('PNG 字节 → decodeBytesForOcr → 识别 与直接识别一致', () {
+    final samples = _loadAll();
+    final truth = (jsonDecode(File('test/fixtures/raw/truth.json').readAsStringSync()) as Map)
+        .map((k, v) => MapEntry('$k'.replaceAll('.png', ''), '$v'));
+    final missed = <String>[];
+    for (final s in samples) {
+      final im = img.Image.fromBytes(
+        width: s.w,
+        height: s.h,
+        bytes: s.rgba.buffer,
+        order: img.ChannelOrder.rgba,
+      );
+      final png = Uint8List.fromList(img.encodePng(im));
+      final ocr = decodeBytesForOcr(png, maxDim: 1600);
+      if (ocr == null) {
+        missed.add('${s.name}=解码失败');
+        continue;
+      }
+      final r = AmountReader.read(ocr.rgba, ocr.width, ocr.height);
+      if (r.text != truth[s.name]) missed.add('${s.name}=${r.text}');
+    }
+    expect(missed, isEmpty, reason: 'Dart 侧解码路线识别失败：${missed.take(5).join(', ')}');
   });
 }

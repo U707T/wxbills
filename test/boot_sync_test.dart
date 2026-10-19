@@ -16,6 +16,9 @@ class FakeSource implements PhotoSource {
   final List<String> paths;
   @override
   bool get supportsRefreshDate => false;
+
+  @override
+  String get loadError => '';
   @override
   Future<({String path, String name})?> pickFolder() async => null;
   @override

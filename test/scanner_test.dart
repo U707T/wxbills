@@ -30,6 +30,9 @@ class FakePhotoSource implements PhotoSource {
   bool get supportsRefreshDate => refreshSupported;
 
   @override
+  String get loadError => '';
+
+  @override
   Future<({String path, String name})?> pickFolder() async =>
       (path: root.path, name: root.path.split(Platform.pathSeparator).last);
 

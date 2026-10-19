@@ -20,7 +20,8 @@ import java.util.concurrent.Executors
 /**
  * 平台通道 `wxbills/scan`：补足 Flutter 侧做不到的事。
  *
- *  1. `readImage`  —— 把 `content://` 大图**按需下采样**成 RGBA 字节交给 Dart。
+ *  1. `readImage`  —— 把 `content://` 大图**按需下采样**成 RGBA 字节交给 Dart；
+ *     `readBytes`  —— 只回原始字节，解码失败时的兜底路线。
  *     Flutter 侧如果直接把 12MP 的图读进内存再解码，既慢又容易 OOM；
  *     这里用 `inSampleSize` 先缩到最长边 ~1600px，单张识别耗时降到几十毫秒。
  *
@@ -41,6 +42,7 @@ class MainActivity : FlutterActivity() {
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "readImage" -> readImage(call, result)
+                    "readBytes" -> readBytes(call, result)
                     "refreshDate" -> refreshDate(call, result)
                     else -> result.notImplemented()
                 }
@@ -85,6 +87,32 @@ class MainActivity : FlutterActivity() {
                 }
             } catch (e: Throwable) {
                 post { result.error("decode_failed", e.message ?: "解码失败", null) }
+            }
+        }
+    }
+
+    /**
+     * 只把原文件字节读回来，不做任何解码。
+     *
+     * 给 Dart 侧当第二路线：`readImage` 走 BitmapFactory，一旦某个机型 / 某个文件
+     * 解码失败，Dart 可以用这条路线拿原始字节自己解，不至于整本账都显示「未识别」。
+     */
+    private fun readBytes(call: MethodCall, result: MethodChannel.Result) {
+        val uri = call.argument<String>("uri")?.let(Uri::parse)
+        if (uri == null) {
+            result.error("bad_args", "缺少 uri", null)
+            return
+        }
+        bg.execute {
+            try {
+                val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                if (bytes == null) {
+                    post { result.error("read_failed", "打不开文件（可能没有读权限）", null) }
+                } else {
+                    post { result.success(bytes) }
+                }
+            } catch (e: Throwable) {
+                post { result.error("read_failed", e.message ?: e.javaClass.simpleName, null) }
             }
         }
     }

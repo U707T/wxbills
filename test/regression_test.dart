@@ -25,6 +25,9 @@ class FakeSource implements PhotoSource {
   bool get supportsRefreshDate => false;
 
   @override
+  String get loadError => '';
+
+  @override
   Future<({String path, String name})?> pickFolder() async => null;
 
   @override
@@ -241,4 +244,65 @@ void main() {
     await tester.pump(const Duration(seconds: 1));
     await tester.runAsync(() => tmp.delete(recursive: true));
   });
+
+  test('识别诊断能指出卡在哪一步（读图失败 / 识别成功）', () async {
+    final tmp = await Directory.systemTemp.createTemp('wxbills_diag');
+    final dirs = AppDirs(Directory('${tmp.path}/data'));
+    await dirs.ensure();
+    final store = BillStore(dirs);
+    await store.load();
+    store.addFolder('/album', 'album');
+    store.put(makeBill('a', '/album/a.png'));
+
+    // 读图失败：诊断里必须带上具体原因，而不是只说「未识别」
+    final broken = _DiagnoseSource()..error = '原生解码失败：decode_failed OOM';
+    final c1 = AppController(dirs: dirs, store: store, source: broken);
+    final text1 = await c1.diagnoseRecognition();
+    expect(text1, contains('读图失败'));
+    expect(text1, contains('decode_failed OOM'), reason: '失败原因必须原样带出来');
+
+    // 读图成功：应报告尺寸与识别结果
+    final ok = _DiagnoseSource()..readable = true;
+    final c2 = AppController(dirs: dirs, store: store, source: ok);
+    final text2 = await c2.diagnoseRecognition();
+    expect(text2, contains('读图成功：2x2'));
+    expect(text2, contains('识别结果'));
+
+    await tmp.delete(recursive: true);
+  });
+}
+
+/// 诊断测试用：可切换「读图失败 / 成功」并带错误原因。
+class _DiagnoseSource implements PhotoSource {
+  bool readable = false;
+  String error = '';
+
+  @override
+  bool get supportsRefreshDate => false;
+
+  @override
+  String get loadError => error;
+
+  @override
+  Future<({String path, String name})?> pickFolder() async => null;
+
+  @override
+  Future<bool> folderExists(String folderPath) async => true;
+
+  @override
+  Future<List<PhotoRef>> listImages(String folderPath, {String folderId = ''}) async => const [];
+
+  @override
+  Future<OcrImage?> loadForOcr(String path, {int maxDim = 1600}) async {
+    if (!readable) return null;
+    return OcrImage(Uint8List(2 * 2 * 4)..fillRange(0, 16, 255), 2, 2);
+  }
+
+  @override
+  Future<Uint8List?> makeThumbBytes(String path, {int maxDim = 256}) async =>
+      Uint8List.fromList([1, 2, 3]);
+
+  @override
+  Future<RefreshOutcome> refreshDate(String path, String? folderPath) async =>
+      const RefreshOutcome(ok: false);
 }

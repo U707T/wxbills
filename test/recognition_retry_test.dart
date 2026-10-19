@@ -19,6 +19,9 @@ class FlakySource implements PhotoSource {
   bool get supportsRefreshDate => false;
 
   @override
+  String get loadError => '';
+
+  @override
   Future<({String path, String name})?> pickFolder() async => null;
 
   @override
