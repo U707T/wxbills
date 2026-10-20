@@ -73,6 +73,12 @@ abstract class PhotoSource {
   /// 生成缩略图（JPEG 字节），失败返回 null。
   Future<Uint8List?> makeThumbBytes(String path, {int maxDim = 256});
 
+  /// 读取**原文件**的完整字节（同步上传原图用）。失败返回 null。
+  ///
+  /// 默认返回 null = 这个实现不参与原图同步；测试里的替身因此不必逐个实现。
+  /// Android（SAF 的 `content://`）与桌面（普通文件）都覆盖了它。
+  Future<Uint8List?> readOriginal(String path) async => null;
+
   /// 把图片的「入库时间」刷新为现在（Android 专属能力）。
   Future<RefreshOutcome> refreshDate(String path, String? folderPath);
 
@@ -312,6 +318,28 @@ class AndroidPhotoSource implements PhotoSource {
     return _encodeJpeg(ocr, maxDim);
   }
 
+  /// 原图上传：走 `readBytes` 通道（只回原始字节，不做下采样）。
+  @override
+  Future<Uint8List?> readOriginal(String path) async {
+    try {
+      final bytes = await _scan.invokeMethod<Uint8List>('readBytes', {'uri': path});
+      if (bytes == null || bytes.isEmpty) {
+        _loadError = '读取原图失败：通道返回空';
+        return null;
+      }
+      return bytes;
+    } on PlatformException catch (e) {
+      _loadError = '读取原图失败：${e.message ?? e.code}';
+      return null;
+    } on MissingPluginException {
+      _loadError = '读取原图失败：平台通道未注册';
+      return null;
+    } catch (e) {
+      _loadError = '读取原图失败：$e';
+      return null;
+    }
+  }
+
   @override
   Future<RefreshOutcome> refreshDate(String path, String? folderPath) async {
     try {
@@ -432,6 +460,9 @@ class DesktopPhotoSource implements PhotoSource {
     _loadError = ocr == null ? '图片解码失败（${bytes.length} 字节）' : '';
     return ocr;
   }
+
+  @override
+  Future<Uint8List?> readOriginal(String path) => _readBytes(path);
 
   @override
   Future<Uint8List?> makeThumbBytes(String path, {int maxDim = 256}) async {

@@ -205,6 +205,16 @@ void main() {
       await tmp.delete(recursive: true);
     });
 
+    test('远端快照里的文件名不能带路径（会被拼成本机路径）', () {
+      final ok = Bill.fromJson({'id': 'a', 't': 'a.jpg', 'ph': 'a.png'});
+      expect(ok.thumb, 'a.jpg');
+      expect(ok.photo, 'a.png');
+
+      final bad = Bill.fromJson({'id': 'a', 't': '../../evil.jpg', 'ph': '../x.png'});
+      expect(bad.thumb, isEmpty, reason: '带路径的名字一律丢掉，宁可不显示图');
+      expect(bad.photo, isEmpty);
+    });
+
     test('原子写：不会留下半截 JSON', () async {
       final (tmp, dirs, store) = await newStore();
       store.put(bill(id: 'a'));

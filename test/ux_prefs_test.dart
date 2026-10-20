@@ -20,6 +20,10 @@ class CountingSource implements PhotoSource {
   bool get supportsCopyImage => false;
   @override
   Future<bool> copyImage(String path) async => false;
+  /// 同步上传原图用：测试替身不参与原图同步
+  @override
+  Future<Uint8List?> readOriginal(String path) async => null;
+
   @override
   String get loadError => '';
   @override

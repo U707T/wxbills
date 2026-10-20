@@ -31,6 +31,7 @@ class Bill {
     this.folder = '',
     this.deleted = false,
     this.thumb = '',
+    this.photo = '',
   });
 
   final String id;
@@ -64,6 +65,13 @@ class Bill {
   /// 缩略图文件名（相对缩略图目录），空表示没有。
   final String thumb;
 
+  /// **原图**在远端的文件名（`<id>.<ext>`，位于 `photos/` 目录），空表示还没传过。
+  ///
+  /// 与 [thumb] 一样随记录同步，但它是完整尺寸的原图：另一台设备下载后
+  /// 才能「复制原图」「留着以后重识别」，而不是只能看一张 256px 的缩略图。
+  /// 名字由 id + 原扩展名决定，两台设备算出来是同一个，所以不需要额外协调。
+  final String photo;
+
   bool get hasAmount => amountCents != null;
 
   /// 金额的展示文本，如 `24.5` / `24.50`（保留两位小数但去掉多余的 0）。
@@ -89,6 +97,7 @@ class Bill {
     String? folder,
     bool? deleted,
     String? thumb,
+    String? photo,
   }) {
     return Bill(
       id: id,
@@ -104,6 +113,7 @@ class Bill {
       folder: folder ?? this.folder,
       deleted: deleted ?? this.deleted,
       thumb: thumb ?? this.thumb,
+      photo: photo ?? this.photo,
     );
   }
 
@@ -122,7 +132,20 @@ class Bill {
         'fd': folder,
         'd': deleted ? 1 : 0,
         't': thumb,
+        'ph': photo,
       };
+
+  /// 只接受 `<id>.<ext>` / `<id>.jpg` 这种纯文件名的形态。
+  ///
+  /// 记录是从网盘下载的 JSON，`t` / `ph` 会被直接拿去拼本机路径
+  /// （`thumbs/…`、`media/…`）。放一个 `../../…` 进来就能写到应用目录之外，
+  /// 所以在这里就把不像文件名的值丢掉，宁可显示占位图。
+  static final RegExp _safeFileName = RegExp(r'^[A-Za-z0-9_-]{1,64}\.[A-Za-z0-9]{1,5}$');
+
+  static String _fileNameOrEmpty(Object? raw) {
+    final name = '${raw ?? ''}';
+    return _safeFileName.hasMatch(name) ? name : '';
+  }
 
   static Bill fromJson(Map<String, Object?> j) {
     final a = j['a'];
@@ -139,7 +162,8 @@ class Bill {
       note: '${j['nt'] ?? ''}',
       folder: '${j['fd'] ?? ''}',
       deleted: (j['d'] as num?)?.toInt() == 1,
-      thumb: '${j['t'] ?? ''}',
+      thumb: _fileNameOrEmpty(j['t']),
+      photo: _fileNameOrEmpty(j['ph']),
     );
   }
 

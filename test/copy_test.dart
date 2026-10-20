@@ -34,6 +34,10 @@ class ClipboardSpy implements PhotoSource {
     return true;
   }
 
+  /// 同步上传原图用：测试替身不参与原图同步
+  @override
+  Future<Uint8List?> readOriginal(String path) async => null;
+
   @override
   String get loadError => '';
 
@@ -173,9 +177,9 @@ void main() {
     expect(controller.toast, contains('缩略图'),
         reason: '要告诉用户「本机也没有缩略图」，而不是只说失败');
 
-    // 连 path 都没有（远端记录且缩略图没下下来）
+    // 连 path 都没有（远端记录，原图和缩略图都还没下下来）
     await controller.copyImage(makeBill(path: ''));
-    expect(controller.toast, contains('没有本机原图'));
+    expect(controller.toast, contains('先同步一次'));
 
     await tmp.delete(recursive: true);
   });

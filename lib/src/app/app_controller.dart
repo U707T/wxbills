@@ -48,7 +48,8 @@ class AppController extends ChangeNotifier {
     required this.source,
   }) {
     scanner = Scanner(store: store, source: source, dirs: dirs);
-    sync = SyncEngine(store);
+    // 把图片源交给同步引擎：上传原图要按平台读文件（Android 是 SAF，桌面是文件系统）
+    sync = SyncEngine(store, source: source);
   }
 
   final AppDirs dirs;
@@ -376,9 +377,9 @@ class AppController extends ChangeNotifier {
       showToast('复制失败：系统剪贴板暂时不可用（可能被其他程序占用），请稍后重试');
       return;
     }
-    showToast(plan.kind == CopyKind.original
+    showToast(plan.isFullSize
         ? '已复制图片，可直接粘贴到聊天窗口'
-        : '已复制缩略图（原图不在这台电脑上，这张图是从其他设备同步来的）');
+        : '已复制缩略图（原图太大或还没同步下来，这张是 256px 的预览图）');
   }
 
   // ---------------------------------------------------------------- 目录
@@ -575,7 +576,7 @@ class AppController extends ChangeNotifier {
     // 否则设置页的「测试连接」会一直转圈（_testing 永远不回落）。
     if (!store.sync.configured) return '先填写服务器地址';
     try {
-      final engine = SyncEngine(store);
+      final engine = SyncEngine(store, source: source);
       return await engine.testConnection();
     } catch (e) {
       return '测试失败：$e';

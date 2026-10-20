@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import '../data/store.dart';
 import '../model/bill.dart';
+import '../platform/photo_source.dart';
 import 'webdav_client.dart';
 
 /// 同步进度（用于界面上的进度条与文案）。
@@ -27,6 +28,9 @@ class SyncResult {
     this.pulled = 0,
     this.thumbsUp = 0,
     this.thumbsDown = 0,
+    this.photosUp = 0,
+    this.photosDown = 0,
+    this.photosSkipped = 0,
     this.conflicts = 0,
   });
 
@@ -36,6 +40,13 @@ class SyncResult {
   final int pulled;
   final int thumbsUp;
   final int thumbsDown;
+
+  /// 原图（完整尺寸）的上传 / 下载张数。
+  final int photosUp;
+  final int photosDown;
+
+  /// 因为文件太大或读不出来而没同步的原图张数。
+  final int photosSkipped;
 
   /// 两台设备都改过、需要按时间裁决的条数。
   final int conflicts;
@@ -66,13 +77,26 @@ class SyncResult {
 /// 都没删时取 `updatedAt` 更新的那条。删除是墓碑（`deleted=1`），所以
 /// 「A 删、B 改」一定收敛到已删除，不会复活。
 class SyncEngine {
-  SyncEngine(this.store, {this.deviceName = ''});
+  SyncEngine(this.store, {this.deviceName = '', PhotoSource? source})
+      : _photoSource = source;
 
   final BillStore store;
   final String deviceName;
 
+  /// 读本机原图用（Android 是 SAF，桌面是文件系统）。
+  ///
+  /// 为空表示这次同步不传原图（只下载）：测试里只关心记录合并时不必造一个
+  /// 图片源；AppController 会把它传进来。
+  final PhotoSource? _photoSource;
+
   static const String snapshotName = 'bills.json';
   static const String thumbsDirName = 'thumbs';
+  static const String photosDirName = 'photos';
+
+  /// 单张原图的上限。超过就跳过并在结果里说一声——
+  /// 一张 100MB 的图会把整个同步卡死，也会把网盘配额吃光。
+  static const int maxPhotoBytes = 32 << 20;
+
   static const int _maxAttempts = 3;
 
   WebDavClient _client() {
@@ -132,19 +156,22 @@ class SyncEngine {
           final winner = mergeBill(l, r);
           // path / folder 是本机定位，属于「设备私有」字段：
           // 远端记录里的路径在这台设备上没有意义，一律保留本机值。
-          merged[id] = winner.copyWith(path: l.path, folder: l.folder);
+          // photo 是跨设备共享的（`<id>.<ext>`，谁先传都算数），
+          // 只要任一端有名字就留着，别因为这条记录"旧"而把原图弄丢。
+          final photo = winner.photo.isNotEmpty
+              ? winner.photo
+              : (l.photo.isNotEmpty ? l.photo : r.photo);
+          merged[id] = winner.copyWith(
+            path: l.path,
+            folder: l.folder,
+            photo: photo,
+          );
         }
 
         // 本机被远端改动的条数（界面上的「拉取」）
         final pulled = merged.values.where((b) {
           final before = localBefore[b.id];
           return before == null || !_sameContent(before, b);
-        }).length;
-
-        // 远端需要被本机改写的条数（界面上的「上传」）
-        final toPush = merged.values.where((b) {
-          final r = remoteBills[b.id];
-          return r == null || !_sameContent(b, r);
         }).length;
 
         // 双方都改过、靠 updatedAt 裁决的条数（诊断用）
@@ -166,9 +193,21 @@ class SyncEngine {
         store.putAll(changedLocal);
         await store.save();
 
-        // ---------------------------------------------------------- 2. 上传合并结果
+        // ---------------------------------------------------------- 2. 原图
+        // 先传/拉原图，再写快照：快照里的 `photo` 名字必须已经对应到远端的
+        // 真实文件，否则另一台设备会照着名字去下载一个还不存在的东西。
+        final photos = await _syncPhotos(client, onProgress);
+
+        // ---------------------------------------------------------- 3. 上传合并结果
         onProgress?.call(SyncProgress('上传合并结果…', 0, 1));
-        final payload = _encodeSnapshot(merged.values.toList());
+        // 用落盘后的**最新**记录编码：上面那步可能刚给若干条补上了 `photo`。
+        final latest = store.allIncludingDeleted;
+        // 远端需要被本机改写的条数（界面上的「上传」）
+        final toPush = latest.where((b) {
+          final r = remoteBills[b.id];
+          return r == null || !_sameContent(b, r);
+        }).length;
+        final payload = _encodeSnapshot(latest);
         // 只在「合并结果和远端内容不一致」时才写回：
         //  * 不能用「字节是否相同」判断 —— 快照里带 savedAt 时间戳，字节永远不同；
         //  * 也不能只看「本机是否变化」—— 本机已是最终版本时（例如刚被远端合并过）
@@ -215,16 +254,25 @@ class SyncEngine {
           }
         }
 
-        // ---------------------------------------------------------- 3. 缩略图
+        // ---------------------------------------------------------- 4. 缩略图
         final thumbStats = await _syncThumbs(
           client,
-          merged.values.where((b) => !b.deleted).toList(),
+          store.liveBills,
           onProgress,
         );
 
         final now = DateTime.now().millisecondsSinceEpoch;
-        final summary = _summary(pushed, pulled, thumbStats.$1, thumbStats.$2,
-            thumbsDirFlat: thumbsAreFlat);
+        final summary = _summary(
+          pushed,
+          pulled,
+          thumbStats.$1,
+          thumbStats.$2,
+          thumbsDirFlat: thumbsAreFlat,
+          photosUp: photos.up,
+          photosDown: photos.down,
+          photosSkipped: photos.skipped,
+          photosDirFlat: photosAreFlat,
+        );
         store.recordSync(now, summary);
         await store.save();
         onProgress?.call(SyncProgress('完成', 1, 1, message: summary));
@@ -235,6 +283,9 @@ class SyncEngine {
           pulled: pulled,
           thumbsUp: thumbStats.$1,
           thumbsDown: thumbStats.$2,
+          photosUp: photos.up,
+          photosDown: photos.down,
+          photosSkipped: photos.skipped,
           conflicts: conflicts,
         );
       }
@@ -340,6 +391,148 @@ class SyncEngine {
       default:
         return '连接失败：${e.message}';
     }
+  }
+
+  // ---------------------------------------------------------------- 原图
+
+  /// 这个网盘不允许建子目录时（坚果云就是这样）：原图退化到与快照同目录，
+  /// 文件名加 `photo_` 前缀。每轮同步重新判断一次，不落盘。
+  bool photosAreFlat = false;
+
+  static const String _flatPhotoPrefix = 'photo_';
+
+  /// 上传 / 下载原图，返回（上传数, 下载数, 跳过数）。
+  ///
+  /// 为什么要传原图：缩略图只有 256px，粘到聊天窗口里是糊的，也没法拿去重新识别；
+  /// 而记录里的 `path` 是**设备私有**的（Android 是 content://，桌面是另一台机器
+  /// 的路径），跨设备没有意义。所以原图必须单独传一份，另一台设备下回来才算真同步。
+  Future<({int up, int down, int skipped})> _syncPhotos(
+    WebDavClient client,
+    void Function(SyncProgress)? onProgress,
+  ) async {
+    final bills = store.liveBills;
+    if (bills.isEmpty) return (up: 0, down: 0, skipped: 0);
+
+    final base = '${client.root}/$photosDirName';
+    final remote = <String, DavEntry>{};
+    var flat = false;
+    try {
+      for (final e in await client.list('$base/')) {
+        if (!e.isDirectory) remote[e.name] = e;
+      }
+    } on WebDavException catch (e) {
+      if (e.status == 404) {
+        // 目录还不存在：建一次；建不出来就退化（和缩略图同一套兜底）。
+        var created = true;
+        try {
+          await client.ensureDir(base);
+        } on WebDavException {
+          created = false;
+        }
+        if (!created) {
+          flat = true;
+          photosAreFlat = true;
+          try {
+            for (final e in await client.list('${client.root}/')) {
+              if (e.isDirectory) continue;
+              if (e.name.startsWith(_flatPhotoPrefix)) {
+                remote[e.name.substring(_flatPhotoPrefix.length)] = e;
+              }
+            }
+          } on WebDavException {
+            // 列不出根目录就当远端全空，逐张补传
+          }
+        }
+      }
+      // 其他错误：当远端全空，逐张补传
+    }
+
+    var up = 0;
+    var down = 0;
+    var skipped = 0;
+    for (var i = 0; i < bills.length; i++) {
+      final b = bills[i];
+      onProgress?.call(SyncProgress('同步原图…', i + 1, bills.length));
+
+      // 名字由 id + 扩展名决定：两台设备各算各的，结果一定是同一个。
+      final name = b.photo.isNotEmpty ? b.photo : photoNameFor(b);
+      final remoteEntry = remote[name];
+      final localLength = await store.mediaLength(name);
+
+      if (remoteEntry != null) {
+        // 远端已有：把名字补进记录（另一台设备先传过、或老记录首次同步），
+        // 本机没有副本就下载一份——复制时拿到的就是**原图**而不是缩略图。
+        if (b.photo != name) store.put(b.copyWith(photo: name));
+        if (localLength != null) continue;
+        try {
+          final got = await client.get(remoteEntry.url, limit: maxPhotoBytes);
+          final bytes = got.bytes;
+          if (bytes != null && bytes.isNotEmpty) {
+            await store.writeMedia(name, bytes);
+            down++;
+          }
+        } on WebDavException {
+          // 单张失败不影响整体，下次同步再补
+        }
+        continue;
+      }
+
+      // 远端还没有：把本机原图传上去。
+      final bytes = await _readOriginalForUpload(b, name);
+      if (bytes == null || bytes.isEmpty) continue;
+      if (bytes.length > maxPhotoBytes) {
+        skipped++;
+        continue;
+      }
+      final target = flat
+          ? '${client.root}/$_flatPhotoPrefix${WebDavClient.encodeSegment(name)}'
+          : '$base/${WebDavClient.encodeSegment(name)}';
+      try {
+        await client.put(target, bytes, contentType: _contentTypeOf(name));
+        up++;
+        if (b.photo != name) store.put(b.copyWith(photo: name));
+      } on WebDavException {
+        // 单张失败不影响整体
+      }
+    }
+    return (up: up, down: down, skipped: skipped);
+  }
+
+  /// 上传用的字节：先用记录里的本机原图（Android 走 SAF / 桌面走文件系统），
+  /// 读不到再退到之前下载下来的副本（远端文件被误删时还能补回去）。
+  Future<Uint8List?> _readOriginalForUpload(Bill b, String name) async {
+    final source = _photoSource;
+    if (source != null && b.path.isNotEmpty) {
+      try {
+        final bytes = await source.readOriginal(b.path);
+        if (bytes != null && bytes.isNotEmpty) return bytes;
+      } catch (_) {
+        // 退回本地副本
+      }
+    }
+    return store.readMedia(name);
+  }
+
+  /// 原图在远端的文件名：`<id><ext>`。
+  ///
+  /// 扩展名取记录里的原图名（同步来的记录也带着它），认不出就按 .jpg 存。
+  static String photoNameFor(Bill b) {
+    final dot = b.name.lastIndexOf('.');
+    var ext = dot > 0 ? b.name.substring(dot).toLowerCase() : '';
+    if (!RegExp(r'^\.[a-z0-9]{1,5}$').hasMatch(ext)) ext = '.jpg';
+    return '${b.id}$ext';
+  }
+
+  static String _contentTypeOf(String name) {
+    final n = name.toLowerCase();
+    if (n.endsWith('.png')) return 'image/png';
+    if (n.endsWith('.webp')) return 'image/webp';
+    if (n.endsWith('.gif')) return 'image/gif';
+    if (n.endsWith('.bmp')) return 'image/bmp';
+    if (n.endsWith('.heic')) return 'image/heic';
+    if (n.endsWith('.heif')) return 'image/heif';
+    if (n.endsWith('.avif')) return 'image/avif';
+    return 'image/jpeg';
   }
 
   // ---------------------------------------------------------------- 缩略图
@@ -487,16 +680,35 @@ class SyncEngine {
       a.note == b.note &&
       a.deleted == b.deleted &&
       a.thumb == b.thumb &&
+      a.photo == b.photo &&
       a.updatedAt == b.updatedAt;
 
-  static String _summary(int pushed, int pulled, int up, int down,
-      {bool thumbsDirFlat = false}) {
+  static String _summary(
+    int pushed,
+    int pulled,
+    int up,
+    int down, {
+    bool thumbsDirFlat = false,
+    int photosUp = 0,
+    int photosDown = 0,
+    int photosSkipped = 0,
+    bool photosDirFlat = false,
+  }) {
     final parts = <String>[];
     if (pushed > 0) parts.add('上传 $pushed 条');
     if (pulled > 0) parts.add('拉取 $pulled 条');
     if (up > 0) parts.add('上传缩略图 $up 张');
     if (down > 0) parts.add('下载缩略图 $down 张');
+    if (photosUp > 0) parts.add('上传原图 $photosUp 张');
+    if (photosDown > 0) parts.add('下载原图 $photosDown 张');
+    if (photosSkipped > 0) {
+      parts.add('$photosSkipped 张原图超过 '
+          '${maxPhotoBytes >> 20}MB，未同步');
+    }
     if (thumbsDirFlat) parts.add('缩略图与记录同目录（该网盘不能建子目录）');
+    if (photosDirFlat && (photosUp > 0 || photosDown > 0)) {
+      parts.add('原图与记录同目录（该网盘不能建子目录）');
+    }
     return parts.isEmpty ? '已是最新，无需同步' : '同步完成：${parts.join('，')}';
   }
 }

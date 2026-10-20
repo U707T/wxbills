@@ -254,6 +254,8 @@ class Scanner {
     store.purgeTombstones();
     await store.save();
     await store.pruneThumbs();
+    // 同步下来的原图副本也跟着记录走：记录没了就删掉，别白占几百 MB
+    await store.pruneMedia();
 
     final parts = <String>['共 ${all.length} 张，更新 $updated 张'];
     if (failed > 0) parts.add('$failed 张未识别');

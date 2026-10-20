@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:path/path.dart' as p;
 
@@ -476,6 +477,72 @@ class BillStore {
     // 同步下载回来的缩略图也要让「文件是否存在」的缓存失效，
     // 否则列表会一直显示占位图，直到下次数据变更才突然出现图片。
     _revision++;
+  }
+
+  // ---------------------------------------------------------------- 原图（同步）
+
+  /// 本地同步原图的字节数；没有这个文件返回 null。
+  ///
+  /// 和缩略图一样，先比大小再决定要不要读整份字节 / 重新下载。
+  Future<int?> mediaLength(String name) async {
+    if (name.isEmpty) return null;
+    try {
+      return await dirs.mediaFile(name).length();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  bool hasMedia(String name) =>
+      name.isNotEmpty && dirs.mediaFile(name).existsSync();
+
+  File? mediaFileOf(String name) {
+    if (name.isEmpty) return null;
+    final f = dirs.mediaFile(name);
+    return f.existsSync() ? f : null;
+  }
+
+  /// 读本地同步原图的字节（远端文件被误删时用它补传）。没有返回 null。
+  Future<Uint8List?> readMedia(String name) async {
+    if (name.isEmpty) return null;
+    try {
+      final f = dirs.mediaFile(name);
+      if (!await f.exists()) return null;
+      return await f.readAsBytes();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 落一份下载回来的原图（先写 .tmp 再 rename，断电不会留下半张图）。
+  Future<void> writeMedia(String name, List<int> bytes) async {
+    await dirs.mediaDir.create(recursive: true);
+    final f = dirs.mediaFile(name);
+    final tmp = File(p.join(dirs.mediaDir.path, '$name.tmp'));
+    await tmp.writeAsBytes(bytes, flush: true);
+    await tmp.rename(f.path);
+  }
+
+  /// 清掉没有对应记录（或记录已删）的同步原图。
+  ///
+  /// 只动 `<support>/media/` 这份**副本**：记录里的本机原图（`path`）永远不碰。
+  Future<int> pruneMedia() async {
+    if (!await dirs.mediaDir.exists()) return 0;
+    var removed = 0;
+    await for (final e in dirs.mediaDir.list()) {
+      if (e is! File) continue;
+      final name = p.basename(e.path);
+      final dot = name.lastIndexOf('.');
+      final id = dot > 0 ? name.substring(0, dot) : name;
+      final bill = _bills[id];
+      if (bill == null || bill.deleted) {
+        try {
+          await e.delete();
+          removed++;
+        } catch (_) {}
+      }
+    }
+    return removed;
   }
 
   /// 清掉没有对应记录（或记录已删）的缩略图。

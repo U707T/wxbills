@@ -7,8 +7,11 @@ import 'app_dirs.dart';
 
 /// 「复制图片」实际能拿到的东西。
 enum CopyKind {
-  /// 本机原图（路径存在）。
+  /// 本机原图（`path` 指向的文件还在）。
   original,
+
+  /// 随同步下载回来的原图（完整尺寸，存在 `<support>/media/`）。
+  syncedOriginal,
 
   /// 本机没有原图，用随同步下载的缩略图兜底。
   thumbnail,
@@ -30,34 +33,54 @@ class CopyPlan {
   final String reason;
 
   bool get canCopy => kind != CopyKind.none;
+
+  /// 这次复制的是不是完整尺寸（而不是 256px 的缩略图）。
+  bool get isFullSize =>
+      kind == CopyKind.original || kind == CopyKind.syncedOriginal;
 }
 
 /// 决定这次复制该把哪个文件放进剪贴板。
 ///
-/// **为什么不能直接用 [Bill.path]**：这个字段是**设备私有**的。从另一台设备
-/// 同步来的记录，`path` 是那台设备的定位（Android 是 `content://…`，
-/// Windows 是另一台机器的绝对路径），在本机根本不存在。同步成功后列表里
-/// 明明看得见缩略图，点「复制」却必然失败——这就是「同步成功后复制失败」。
+/// 来源按三级取，越靠前越清楚：
+///  1. **本机原图**（[Bill.path] 指向的文件还在）；
+///  2. **随同步下载的原图**（[Bill.photo] → `<support>/media/<id>.<ext>`）；
+///  3. **缩略图**（`thumbs/<id>.jpg`，256px，能看但不清）。
 ///
-/// 缩略图（`<id>.jpg`）会随记录一起同步下来，所以原图不在时用它兜底，
-/// 并把它复制成**原图的名字**（`copy/微信图片_xxx.jpg`）——直接拿
-/// `thumbs/<id>.jpg` 交给剪贴板，粘到聊天窗口里对方看到的就是一串十六进制。
+/// 为什么要这套顺序：[Bill.path] 是**设备私有**的，从另一台设备同步来的记录
+/// 带着那台设备的定位（Android 是 `content://…`，Windows 是另一台机器的路径），
+/// 在本机根本不存在。原图现在会随同步下载到本机，所以第二级几乎总能命中；
+/// 缩略图只在原图还没下完 / 太大被跳过时兜底，避免「列表里看得见图，点复制却失败」。
 ///
-/// 刻意做成同步的：缩略图只有几十 KB，读写都在 1ms 量级；而「点一下按钮」
-/// 必须立刻有反应，异步化只会让按钮和结果之间多出几帧空窗。
+/// 不管用哪一级，都复制成**原图的名字**（`copy/微信图片_xxx.jpg`）——
+/// 直接拿 `media/<id>.jpg` 交给剪贴板，粘到聊天窗口里对方看到的是一串十六进制。
+///
+/// 刻意做成同步的：缩略图只有几十 KB，原图也只有几 MB，读写都在毫秒级；
+/// 而「点一下按钮」必须立刻有反应，异步化只会让按钮和结果之间多出几帧空窗。
 CopyPlan resolveCopyPlan(Bill bill, AppDirs dirs) {
+  // 1) 本机原图
   if (_exists(bill.path)) {
     return CopyPlan(CopyKind.original, path: bill.path);
   }
-  final thumb = _materializeThumb(bill, dirs);
-  if (thumb != null) {
-    return CopyPlan(CopyKind.thumbnail, path: thumb);
+
+  // 2) 同步下来的原图（完整尺寸）
+  if (bill.photo.isNotEmpty) {
+    final synced =
+        _materialize(dirs, dirs.mediaFile(bill.photo), copyFileName(bill));
+    if (synced != null) return CopyPlan(CopyKind.syncedOriginal, path: synced);
   }
+
+  // 3) 缩略图兜底
+  if (bill.thumb.isNotEmpty) {
+    final thumb = _materialize(
+        dirs, dirs.thumbFile(p.basename(bill.thumb)), copyFileName(bill));
+    if (thumb != null) return CopyPlan(CopyKind.thumbnail, path: thumb);
+  }
+
   return CopyPlan(
     CopyKind.none,
     reason: bill.path.isEmpty
-        ? '这条记录没有本机原图（是从其他设备同步来的），也没有缩略图可复制'
-        : '复制失败：原图不在这台电脑上（可能已被移动或删除），也没有缩略图可复制',
+        ? '这条记录还没有可复制的图（原图和缩略图都没同步下来），先同步一次再试'
+        : '复制失败：原图不在这台电脑上（可能已被移动或删除），也没有可复制的缩略图',
   );
 }
 
@@ -101,17 +124,17 @@ bool _exists(String path) {
   }
 }
 
-/// 把缩略图复制成 `copy/<原图名>`。没有缩略图返回 null。
-String? _materializeThumb(Bill bill, AppDirs dirs) {
-  if (bill.thumb.isEmpty) return null;
-  final src = dirs.thumbFile(p.basename(bill.thumb));
+/// 把 [src] 复制成 `copy/<原图名>` 并返回路径；源文件不存在返回 null。
+///
+/// 统一走这一条路：缩略图和同步原图都先落成「原图的名字」再交给剪贴板。
+String? _materialize(AppDirs dirs, File src, String name) {
   try {
     if (!src.existsSync()) return null;
     final bytes = src.readAsBytesSync();
     if (bytes.isEmpty) return null;
     dirs.copyDir.createSync(recursive: true);
 
-    final target = _pickTarget(dirs, copyFileName(bill), bytes);
+    final target = _pickTarget(dirs, name, bytes);
     // 同一条记录重复复制：内容一样就不再写盘（避免把上一次复制的文件换掉）
     if (!target.existsSync() || !_sameBytes(target.readAsBytesSync(), bytes)) {
       final tmp = File('${target.path}.tmp');

@@ -10,6 +10,7 @@ import 'package:path_provider/path_provider.dart';
 /// <support>/thumbs/<id>.jpg    缩略图（随 WebDAV 同步）
 /// <support>/cache/             扫描时的临时文件
 /// <support>/copy/<原名>.jpg    复制图片时交给剪贴板的文件（没有原图时用缩略图生成）
+/// <support>/media/<id>.<ext>   从同步下载的原图（完整尺寸，供复制 / 重识别）
 /// ```
 class AppDirs {
   AppDirs(this.root);
@@ -36,6 +37,12 @@ class AppDirs {
   /// 文件必须还在。这里自己按天数清理（见 `copy_plan.dart`）。
   Directory get copyDir => Directory(p.join(root.path, 'copy'));
 
+  /// 从 WebDAV 下载的原图。文件名是 `<id>.<ext>`（与记录里的 `photo` 字段一致）。
+  ///
+  /// 刻意不放进 thumbs：缩略图会被 `pruneThumbs` 按「有没有记录」清掉，
+  /// 而原图体积大、重新下载代价高，清理策略要单独一套。
+  Directory get mediaDir => Directory(p.join(root.path, 'media'));
+
   Future<void> ensure() async {
     await root.create(recursive: true);
     await thumbDir.create(recursive: true);
@@ -45,4 +52,6 @@ class AppDirs {
   File thumbFile(String name) => File(p.join(thumbDir.path, name));
 
   File copyFile(String name) => File(p.join(copyDir.path, name));
+
+  File mediaFile(String name) => File(p.join(mediaDir.path, name));
 }
