@@ -350,7 +350,7 @@ class DesktopPhotoSource implements PhotoSource {
   bool get supportsCopyImage => true;
 
   @override
-  Future<bool> copyImage(String path) async => WindowsClipboard.copyFile(path);
+  Future<bool> copyImage(String path) => WindowsClipboard.copyFile(path);
 
   @override
   Future<({String path, String name})?> pickFolder() async {

@@ -287,13 +287,18 @@ void main() {
     late Directory tmp;
     late AppController controller;
     late FakeSource source;
+    late String shot;
     await tester.runAsync(() async {
       tmp = await Directory.systemTemp.createTemp('wxbills_copy');
       final dirs = AppDirs(tmp);
       await dirs.ensure();
       final store = BillStore(dirs);
       await store.load();
-      source = FakeSource(paths: ['/album/a.png'])..copyable = true;
+      // 原图必须是**真实存在**的文件：控制器会先确认文件在不在，
+      // 找不到原图才退到缩略图（见 copy_plan.dart）。
+      shot = '${tmp.path}/a.png';
+      await File(shot).writeAsBytes(List<int>.filled(64, 1));
+      source = FakeSource(paths: [shot])..copyable = true;
       store.addFolder('/album', 'album');
       controller = AppController(dirs: dirs, store: store, source: source);
       await controller.init();
@@ -310,7 +315,7 @@ void main() {
     await tester.tap(find.byIcon(Icons.content_copy_rounded));
     await tester.pumpAndSettle();
 
-    expect(source.copied, ['/album/a.png'], reason: '点按钮要把这条记录的原图交给剪贴板');
+    expect(source.copied, [shot], reason: '原图在本机时，点按钮要把原图交给剪贴板');
     await tester.pump(const Duration(seconds: 4));
     await tester.runAsync(() => tmp.delete(recursive: true));
   });

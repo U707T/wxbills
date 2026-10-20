@@ -111,7 +111,7 @@ class BillTile extends StatelessWidget {
           else if (controller.source.supportsCopyImage)
             IconButton(
               onPressed: onCopy,
-              tooltip: '复制图片（可直接粘贴到聊天窗口）',
+              tooltip: '复制图片（可直接粘贴到聊天窗口；本机没有原图时复制缩略图）',
               icon: const Icon(Icons.content_copy_rounded, size: 17),
               style: IconButton.styleFrom(
                 backgroundColor: dark ? const Color(0xFF262A2C) : Palette.greenSoft,

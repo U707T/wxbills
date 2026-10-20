@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import '../ocr/amount_reader.dart';
 
 import '../data/app_dirs.dart';
+import '../data/copy_plan.dart';
 import '../data/scanner.dart';
 import '../data/store.dart';
 import '../model/bill.dart';
@@ -347,18 +348,37 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  /// 复制这张图的原始文件到系统剪贴板（桌面端顶替「刷新日期」）。
+  /// 复制这张图到系统剪贴板（桌面端顶替「刷新日期」）。
+  ///
+  /// 来源按「先原图、后缩略图」两级取（见 [resolveCopyPlan]）：
+  /// 从另一台设备同步来的记录，[Bill.path] 是那台设备的定位，在这台电脑上
+  /// 并不存在；但缩略图已经随同步下载好了，列表里也看得见。这时直接判失败
+  /// 就是「同步成功了，复制却失败」——所以用缩略图兜底，至少粘得出去。
   Future<void> copyImage(Bill bill) async {
     if (!source.supportsCopyImage) {
       showToast('当前平台不支持复制图片');
       return;
     }
-    if (bill.path.isEmpty) {
-      showToast('这条记录没有本机原图（可能是从其他设备同步来的）');
+    final plan = resolveCopyPlan(bill, dirs);
+    if (!plan.canCopy) {
+      showToast(plan.reason);
       return;
     }
-    final ok = await source.copyImage(bill.path);
-    showToast(ok ? '已复制图片，可直接粘贴到聊天窗口' : '复制失败：原图可能已被移动或删除');
+    var ok = false;
+    try {
+      ok = await source.copyImage(plan.path);
+    } catch (_) {
+      ok = false;
+    }
+    if (!ok) {
+      // 走到这里说明文件确实在（上面刚查过），失败的只可能是剪贴板本身：
+      // 常见是别的程序（剪贴板管理器 / 远程桌面）正占着它。
+      showToast('复制失败：系统剪贴板暂时不可用（可能被其他程序占用），请稍后重试');
+      return;
+    }
+    showToast(plan.kind == CopyKind.original
+        ? '已复制图片，可直接粘贴到聊天窗口'
+        : '已复制缩略图（原图不在这台电脑上，这张图是从其他设备同步来的）');
   }
 
   // ---------------------------------------------------------------- 目录

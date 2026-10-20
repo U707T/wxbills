@@ -118,6 +118,10 @@ class SyncEngine {
           final l = localBefore[id];
           final r = remoteBills[id];
           if (l == null) {
+            // 远端独有：path / folder 是**那台设备**的定位，本机大概率不存在。
+            // 仍然原样存下来（两台机器用同一个同步盘、同一路径时可以直接复用），
+            // 但任何「打开本机文件」的地方都必须自己确认文件在不在——
+            // 「复制图片」就是靠这一点退到缩略图的（见 data/copy_plan.dart）。
             merged[id] = r!;
             continue;
           }

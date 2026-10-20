@@ -40,7 +40,7 @@
 | 图片来源 | SAF 授权目录（`content://`） | 本地文件夹路径 |
 | 金额识别 | 原生下采样 → Dart 模板匹配 | `image` 包解码 → 同一套匹配 |
 | 缩略图 | 系统缩略图（最快） | 解码后缩放 |
-| 行内快捷操作 | 刷新图片日期 | **复制图片**（原文件进剪贴板） |
+| 行内快捷操作 | 刷新图片日期 | **复制图片**（原图进剪贴板；原图不在本机时复制同步来的缩略图） |
 | 刷新图片日期 | ✅ | ❌（桌面没有「相册入库时间」概念） |
 | WebDAV 同步 | ✅ | ✅ |
 
@@ -63,6 +63,8 @@
   「A 删除、B 修改」一定收敛到已删除，不会复活。扫描也不会把用户删掉的记录重新捡回来。
 - **设备私有字段不合并**：`path` / `folder` 是本机定位，
   从另一台设备同步来的记录不会被本机的路径覆盖，也不会被本机扫描误判为「已删除」。
+  代价是这些记录在本机没有原图——所以桌面端「复制图片」会自动退到随同步下来的缩略图
+  （存成原图的名字再交给剪贴板），不会出现「列表里看得见图、点复制却失败」。
 
 ## 开发
 
@@ -70,7 +72,7 @@
 export PATH=/opt/flutter/bin:$PATH
 flutter pub get
 flutter analyze
-flutter test                      # 77 项：OCR 回归 / 同步端到端 / 存储 / 扫描 / UI / 回归 / 启动与提示
+flutter test                      # 83 项：OCR 回归 / 同步端到端 / 复制图片 / 存储 / 扫描 / UI / 回归 / 启动与提示
 flutter build apk --debug --target-platform=android-arm64
 ```
 
@@ -83,6 +85,7 @@ flutter build apk --debug --target-platform=android-arm64
 | `test/recognition_retry_test.dart` | 未识别记录会重试、静默扫描不重试、手工金额不被覆盖 |
 | `test/sync_test.dart` | 首次上传 / 拉取 / 双向修改 / 删除同步 / ETag 冲突重试 / 401 / 500 / 远端损坏 / 缩略图 |
 | `test/sync_nutstore_test.dart` | 坚果云式路径（子目录自建）/ 重复同步 0 PUT / 缩略图只下载一次 / 弱 ETag 不 412 / 测试连接回显路径 |
+| `test/copy_test.dart` | 同步来的记录复制走缩略图兜底 / 原图优先 / 缺图与剪贴板被占用的提示 / 文件名清洗 / 同名不覆盖 |
 | `test/store_test.dart` | 金额格式化、合并交换律、原子写、坏文件恢复、墓碑清理 |
 | `test/scanner_test.dart` | 增量扫描、手工金额不被覆盖、删除留墓碑、跨设备记录不误删 |
 | `test/regression_test.dart` | 列目录失败不误删、删后重扫不复活、并发落盘、定位屏外记录、删除优先合并 |
