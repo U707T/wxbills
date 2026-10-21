@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.MediaStore
+import android.provider.OpenableColumns
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodCall
@@ -43,6 +44,7 @@ class MainActivity : FlutterActivity() {
                 when (call.method) {
                     "readImage" -> readImage(call, result)
                     "readBytes" -> readBytes(call, result)
+                    "stat" -> stat(call, result)
                     "refreshDate" -> refreshDate(call, result)
                     else -> result.notImplemented()
                 }
@@ -117,6 +119,32 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    /**
+     * 只回文件大小，不读内容。
+     *
+     * 同步上传原图前用它挡 32MB 上限：先 `readBytes` 再判断等于先把几十 MB
+     * 读进堆再决定不要，超限的图正好会在最需要保护的时候 OOM。
+     */
+    private fun stat(call: MethodCall, result: MethodChannel.Result) {
+        val uri = call.argument<String>("uri")?.let(Uri::parse)
+        if (uri == null) {
+            result.error("bad_args", "缺少 uri", null)
+            return
+        }
+        bg.execute {
+            val size = runCatching {
+                contentResolver.query(
+                    uri, arrayOf(OpenableColumns.SIZE), null, null, null
+                )?.use { c -> if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else null }
+            }.getOrNull() ?: runCatching {
+                contentResolver.openAssetFileDescriptor(uri, "r")?.use { fd ->
+                    fd.length.takeIf { it >= 0 }
+                }
+            }.getOrNull()
+            post { result.success(size) }
+        }
+    }
+
     /** 先只读尺寸再下采样，避免 4000x6000 的图直接把内存打爆 */
     private fun decodeSampled(uri: Uri, maxDim: Int): Bitmap? {
         val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -168,18 +196,6 @@ class MainActivity : FlutterActivity() {
     private fun refresh(uri: Uri, treeUri: Uri?): Map<String, Any?> {
         val resolver = contentResolver
         val name = queryName(uri)
-        val bytes = try {
-            resolver.openInputStream(uri)?.use { it.readBytes() }
-        } catch (e: Throwable) {
-            null
-        } ?: return mapOf(
-            "ok" to false,
-            "message" to "读不到原图（可能没有读权限）",
-        )
-        if (bytes.isEmpty()) {
-            return mapOf("ok" to false, "message" to "原图是空的，已跳过")
-        }
-
         val nowSec = System.currentTimeMillis() / 1000
 
         // ---- 路线 0（最优先）：有「所有文件访问权限」时直接改。
@@ -226,7 +242,8 @@ class MainActivity : FlutterActivity() {
         }
 
         // ---- A：直接改媒体库记录（没有全文件权限时的尝试）
-        val mediaId = findMediaId(name)
+        // 优先按绝对路径定位：同名截图在别的目录里时，只按文件名会改错那一张。
+        val mediaId = findMediaIdByPath(realPath(uri)) ?: findMediaId(name)
         if (mediaId != null) {
             val row = ContentUris.withAppendedId(
                 MediaStore.Images.Media.EXTERNAL_CONTENT_URI, mediaId
@@ -252,6 +269,20 @@ class MainActivity : FlutterActivity() {
                     )
                 }
             }
+        }
+
+        // ---- 到这里才需要文件内容：路线 0 与 A 只改时间戳/媒体库记录，
+        //      以前一进函数就把整张原图读进内存，成功走前两条路线时那几十 MB 白读。
+        val bytes = try {
+            resolver.openInputStream(uri)?.use { it.readBytes() }
+        } catch (e: Throwable) {
+            null
+        } ?: return mapOf(
+            "ok" to false,
+            "message" to "读不到原图（可能没有读权限）",
+        )
+        if (bytes.isEmpty()) {
+            return mapOf("ok" to false, "message" to "原图是空的，已跳过")
         }
 
         // ---- B：重新造一个新文件（新 _ID → date_added 天然是现在）
@@ -314,7 +345,7 @@ class MainActivity : FlutterActivity() {
         rescan(uri, name)
         val diag = buildString {
             append("全文件权限=").append(if (hasAllFiles()) "有" else "无")
-            append("; 读图=").append(if (bytes.isNotEmpty()) "OK" else "失败")
+            append("; 读图=OK（${bytes.size} 字节）")
             append("; 媒体库记录=")
             append(
                 when {

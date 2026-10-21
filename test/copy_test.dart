@@ -25,6 +25,11 @@ class ClipboardSpy implements PhotoSource {
 
   @override
   bool get supportsCopyImage => true;
+  @override
+  String get listError => '';
+
+  @override
+  Future<int?> originalLength(String path) async => null;
 
   @override
   Future<bool> copyImage(String path) async {

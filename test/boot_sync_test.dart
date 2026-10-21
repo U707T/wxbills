@@ -19,6 +19,11 @@ class FakeSource implements PhotoSource {
 
   @override
   bool get supportsCopyImage => false;
+  @override
+  String get listError => '';
+
+  @override
+  Future<int?> originalLength(String path) async => null;
 
   @override
   Future<bool> copyImage(String path) async => false;

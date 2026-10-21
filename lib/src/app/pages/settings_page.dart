@@ -31,6 +31,9 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _diagnosing = false;
   String _diagnosis = '';
 
+  /// 用户真的改过表单里的东西才在退出时落盘。
+  bool _dirty = false;
+
   /// WebDAV 填写说明是否展开：默认只在「还没配好」时展开。
   late bool _helpOpen;
 
@@ -40,8 +43,10 @@ class _SettingsPageState extends State<SettingsPage> {
   void initState() {
     super.initState();
     final cfg = c.store.sync;
-    // 默认就是坚果云：用户只需要补账号和应用密码
-    _url = TextEditingController(text: cfg.url.isEmpty ? kDefaultDavUrl : cfg.url);
+    // 地址框留空，用 hintText 展示默认的坚果云地址。
+    // 以前是把默认值直接塞进输入框，再在 dispose 里无条件保存 —— 结果「打开设置
+    // 再返回」就等于替用户配好了一个空账号的同步（之后每次改数据都会 401）。
+    _url = TextEditingController(text: cfg.url);
     _user = TextEditingController(text: cfg.username);
     _pass = TextEditingController(text: cfg.password);
     _insecure = cfg.allowInsecureTls;
@@ -67,6 +72,8 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   void _saveQuietlyOnExit() {
+    // 没改过就什么都不写：打开看一眼不该产生任何副作用。
+    if (!_dirty) return;
     try {
       final next = SyncConfig(
         url: _url.text.trim(),
@@ -76,14 +83,9 @@ class _SettingsPageState extends State<SettingsPage> {
         autoSync: _auto,
         lastSyncAt: c.store.sync.lastSyncAt,
         lastSyncMessage: c.store.sync.lastSyncMessage,
+        lastSyncOk: c.store.sync.lastSyncOk,
       );
-      if (next.url != c.store.sync.url ||
-          next.username != c.store.sync.username ||
-          next.password != c.store.sync.password ||
-          next.allowInsecureTls != c.store.sync.allowInsecureTls ||
-          next.autoSync != c.store.sync.autoSync) {
-        c.saveSyncSilently(next);
-      }
+      c.saveSyncSilently(next);
     } catch (_) {
       // 退出路径上不要因为保存失败把页面弄崩
     }
@@ -93,8 +95,9 @@ class _SettingsPageState extends State<SettingsPage> {
     if (mounted) setState(() {});
   }
 
-  /// 地址栏内容变化时只为了刷新「用默认地址」按钮的显隐。
+  /// 地址栏内容变化时刷新「用默认地址」按钮的显隐，并记下「改过了」。
   void _onUrlChanged() {
+    _dirty = true;
     if (mounted) setState(() {});
   }
 
@@ -107,7 +110,9 @@ class _SettingsPageState extends State<SettingsPage> {
       autoSync: _auto,
       lastSyncAt: c.store.sync.lastSyncAt,
       lastSyncMessage: c.store.sync.lastSyncMessage,
+      lastSyncOk: c.store.sync.lastSyncOk,
     ));
+    _dirty = false;
     if (!quiet) c.showToast('已保存');
   }
 
@@ -235,6 +240,7 @@ class _SettingsPageState extends State<SettingsPage> {
                 child: TextField(
                   controller: _user,
                   autocorrect: false,
+                  onChanged: (_) => _dirty = true,
                   style: const TextStyle(fontSize: 13.5),
                   decoration: const InputDecoration(labelText: '用户名'),
                 ),
@@ -245,6 +251,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   controller: _pass,
                   obscureText: !_showPass,
                   autocorrect: false,
+                  onChanged: (_) => _dirty = true,
                   style: const TextStyle(fontSize: 13.5),
                   decoration: InputDecoration(
                     labelText: '密码 / 应用密码',
@@ -263,7 +270,10 @@ class _SettingsPageState extends State<SettingsPage> {
           const SizedBox(height: 6),
           SwitchListTile(
             value: _insecure,
-            onChanged: (v) => setState(() => _insecure = v),
+            onChanged: (v) => setState(() {
+              _insecure = v;
+              _dirty = true;
+            }),
             dense: true,
             contentPadding: EdgeInsets.zero,
             title: const Text('允许不受信任的证书',
@@ -273,7 +283,10 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           SwitchListTile(
             value: _auto,
-            onChanged: (v) => setState(() => _auto = v),
+            onChanged: (v) => setState(() {
+              _auto = v;
+              _dirty = true;
+            }),
             dense: true,
             contentPadding: EdgeInsets.zero,
             title: const Text('自动同步', style: TextStyle(fontSize: 13.5)),
@@ -288,9 +301,7 @@ class _SettingsPageState extends State<SettingsPage> {
               style: TextStyle(
                 fontSize: 11.5,
                 height: 1.5,
-                color: cfg.lastSyncMessage.contains('失败')
-                    ? Palette.red
-                    : Palette.textDim,
+                color: cfg.lastSyncOk ? Palette.textDim : Palette.red,
               ),
             ),
           ],

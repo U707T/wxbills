@@ -95,12 +95,21 @@ class Scanner {
     onProgress?.call(const ScanProgress(message: '正在列目录…'));
     final perFolder = <String, List<PhotoRef>>{};
     final failedFolders = <String>{};
+    var listErrorHint = '';
     for (final f in folders) {
       if (_cancelled) break;
       try {
-        perFolder[f.id] = await source.listImages(f.path, folderId: f.id);
-      } catch (_) {
+        final refs = await source.listImages(f.path, folderId: f.id);
+        perFolder[f.id] = refs;
+        // 平台层部分失败时不会抛异常（例如 SAF 里某个子目录读不到），
+        // 只看返回值就会把「没列出来」误判成「文件没了」。这里必须认这个信号。
+        if (source.listError.isNotEmpty) {
+          failedFolders.add(f.id);
+          listErrorHint = source.listError;
+        }
+      } catch (e) {
         failedFolders.add(f.id);
+        if (listErrorHint.isEmpty) listErrorHint = '$e';
       }
     }
     // 去重（同一张图可能被多个目录包含）
@@ -123,6 +132,8 @@ class Scanner {
     var failed = 0;
     var loadFailed = 0;
     var retried = 0;
+    // 每 10 张全量重写快照在几百条记录时是明显浪费，改成「按时间节流」。
+    var lastSaveAt = 0;
 
     for (final ref in all) {
       if (_cancelled) break;
@@ -142,6 +153,18 @@ class Scanner {
           prev.fileModified == ref.modified;
 
       if (unchanged) {
+        // 缩略图缺失必须补一次：上次生成失败（大图 OOM / 系统缩略图被限流）时
+        // 文件没改过，只按修改时间判断会让这条记录永远没有图。
+        if (prev.thumb.isEmpty) {
+          final thumb = await _ensureThumb(ref, prev.id);
+          if (thumb.isNotEmpty && _stillOwned(prev)) {
+            store.put(prev.copyWith(
+              thumb: thumb,
+              updatedAt: DateTime.now().millisecondsSinceEpoch,
+            ));
+            updated++;
+          }
+        }
         if (done % 20 == 0 || done == all.length) {
           onProgress?.call(ScanProgress(
             total: all.length,
@@ -193,6 +216,7 @@ class Scanner {
         if (outcome.cents == null) failed++;
       } else if (prev.manual) {
         // 手工确认过：只刷新文件元信息与缩略图，金额/备注绝不动
+        if (!_stillOwned(prev)) continue;
         final needsThumb = prev.thumb.isEmpty && outcome.thumb.isNotEmpty;
         final next = prev.copyWith(
           name: ref.name,
@@ -206,6 +230,9 @@ class Scanner {
         store.put(next);
         if (needsThumb) updated++;
       } else {
+        // 识别是异步的：这期间用户可能已经手改了金额或删了这条记录。
+        // 那种情况下扫描必须让位，不能拿旧快照把它写回去。
+        if (!_stillOwned(prev)) continue;
         final next = prev.copyWith(
           name: ref.name,
           amountCents: outcome.cents,
@@ -225,8 +252,13 @@ class Scanner {
         if (outcome.cents == null) failed++;
       }
 
-      // 每 10 张落一次盘，避免扫到一半被杀全丢
-      if (done % 10 == 0) await store.save();
+      // 落盘按时间节流：几百条记录时「每 10 张全量重写一次 JSON」是纯浪费
+      // （1000 张就是 100 次序列化 + 写盘），改成最多 4 秒一次。
+      final saveNow = DateTime.now().millisecondsSinceEpoch;
+      if (saveNow - lastSaveAt > 4000) {
+        lastSaveAt = saveNow;
+        await store.save();
+      }
     }
 
     // 3) 清理已从磁盘消失的文件（软删除，让删除能同步出去）
@@ -250,8 +282,9 @@ class Scanner {
     for (final f in folders) {
       store.touchFolder(f.id, DateTime.now().millisecondsSinceEpoch);
     }
-    // 墓碑会随同步一直传下去，但不必永久保留：清掉过期的，快照才不会被历史撑大。
-    store.purgeTombstones();
+    // 墓碑不能在这里单独清：只清本机的话，下一次同步会把远端的墓碑原样合并回来
+    // （清理等于没做）。过期墓碑的清理放在 SyncEngine.run() 里，随合并结果一起
+    // 写回远端，两端才会真正变小。
     await store.save();
     await store.pruneThumbs();
     // 同步下来的原图副本也跟着记录走：记录没了就删掉，别白占几百 MB
@@ -261,7 +294,11 @@ class Scanner {
     if (failed > 0) parts.add('$failed 张未识别');
     if (loadFailed > 0) parts.add('$loadFailed 张图片读取失败');
     if (failedFolders.isNotEmpty) {
-      parts.add('${failedFolders.length} 个目录读取失败，已跳过清理');
+      final hint = listErrorHint.length > 80
+          ? '${listErrorHint.substring(0, 80)}…'
+          : listErrorHint;
+      parts.add('${failedFolders.length} 个目录读取失败，已跳过清理'
+          '${hint.isEmpty ? '' : '（$hint）'}');
     }
     final msg = parts.join('，');
     final result = ScanProgress(
@@ -278,11 +315,18 @@ class Scanner {
     return result;
   }
 
-  /// 只识别一张（用于「重新识别这一张」）。
-  Future<AmountResult> readOne(String path) async {
-    final ocr = await source.loadForOcr(path);
-    if (ocr == null) return AmountResult.empty;
-    return AmountReader.read(ocr.rgba, ocr.width, ocr.height);
+  /// 这条记录还是不是扫描开始时看到的那一份。
+  ///
+  /// 扫描一条一条跑、每条都要 await 解码与识别；这期间用户完全可能在列表里
+  /// 手改金额或删掉它。写回前用 `updatedAt` 比对一次：对不上就整条让位，
+  /// 绝不拿旧快照覆盖用户的选择。
+  bool _stillOwned(Bill prev) {
+    final cur = store.byId(prev.id);
+    if (cur == null) return false;
+    if (cur.deleted) return false;
+    if (cur.updatedAt != prev.updatedAt) return false;
+    if (cur.manual && !prev.manual) return false;
+    return true;
   }
 
   Future<_Outcome> _recognize(PhotoRef ref, String billId) async {

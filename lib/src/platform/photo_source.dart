@@ -67,6 +67,13 @@ abstract class PhotoSource {
   /// 递归列出目录下的图片（最深 2 层子目录，与原版一致）。
   Future<List<PhotoRef>> listImages(String folderPath, {String folderId = ''});
 
+  /// 最近一次 [listImages] 是否遇到过读取失败（含子目录）。
+  ///
+  /// 这个信号决定扫描敢不敢「按磁盘现状清理记录」：只要列目录失败过，
+  /// 拿到的列表就是残缺的，那时把「不在列表里」当成「文件已删除」等于删账。
+  /// 默认空串（测试替身不必实现）。
+  String get listError => '';
+
   /// 读出用于 OCR 的像素图（已按需下采样，最长边约 [maxDim]）。
   Future<OcrImage?> loadForOcr(String path, {int maxDim = 1600});
 
@@ -78,6 +85,12 @@ abstract class PhotoSource {
   /// 默认返回 null = 这个实现不参与原图同步；测试里的替身因此不必逐个实现。
   /// Android（SAF 的 `content://`）与桌面（普通文件）都覆盖了它。
   Future<Uint8List?> readOriginal(String path) async => null;
+
+  /// 原文件字节数。未知返回 null。
+  ///
+  /// 同步上传前先用它判断 32MB 上限：先 `readOriginal` 再判断等于
+  /// 「先把几十 MB 读进堆再决定不要」，超限的图正好会在最需要保护时 OOM。
+  Future<int?> originalLength(String path) async => null;
 
   /// 把图片的「入库时间」刷新为现在（Android 专属能力）。
   Future<RefreshOutcome> refreshDate(String path, String? folderPath);
@@ -194,9 +207,15 @@ class AndroidPhotoSource implements PhotoSource {
     }
   }
 
+  String _listError = '';
+
+  @override
+  String get listError => _listError;
+
   @override
   Future<List<PhotoRef>> listImages(String folderPath,
       {String folderId = ''}) async {
+    _listError = '';
     final out = <PhotoRef>[];
     await _walk(folderPath, out, 0, folderId);
     return out;
@@ -208,7 +227,10 @@ class AndroidPhotoSource implements PhotoSource {
     List<SafDocumentFile> children;
     try {
       children = await _saf.list(dirUri);
-    } catch (_) {
+    } catch (e) {
+      // 不能静默返回空列表：上层会以为「这个目录里一张图都没有」，
+      // 收尾清理时把整个相册的记录打成墓碑（见 Scanner.scanAll 的清理段）。
+      _listError = '列目录失败：$e';
       return;
     }
     for (final c in children) {
@@ -318,6 +340,17 @@ class AndroidPhotoSource implements PhotoSource {
     return _encodeJpeg(ocr, maxDim);
   }
 
+  /// 原图大小：走 `stat` 通道（`OpenableColumns.SIZE`，拿不到再退回 fd 长度）。
+  @override
+  Future<int?> originalLength(String path) async {
+    try {
+      final size = await _scan.invokeMethod<int>('stat', {'uri': path});
+      return size != null && size >= 0 ? size : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// 原图上传：走 `readBytes` 通道（只回原始字节，不做下采样）。
   @override
   Future<Uint8List?> readOriginal(String path) async {
@@ -397,9 +430,15 @@ class DesktopPhotoSource implements PhotoSource {
   Future<bool> folderExists(String folderPath) async =>
       Directory(folderPath).exists();
 
+  String _listError = '';
+
+  @override
+  String get listError => _listError;
+
   @override
   Future<List<PhotoRef>> listImages(String folderPath,
       {String folderId = ''}) async {
+    _listError = '';
     final out = <PhotoRef>[];
     await _walk(Directory(folderPath), out, 0, folderId);
     return out;
@@ -411,7 +450,9 @@ class DesktopPhotoSource implements PhotoSource {
     List<FileSystemEntity> entries;
     try {
       entries = await dir.list(followLinks: false).toList();
-    } catch (_) {
+    } catch (e) {
+      // 网络盘断连 / 移动硬盘拔掉 / 权限变化：同样不能当成「目录是空的」
+      _listError = '列目录失败：$e';
       return;
     }
     for (final e in entries) {
@@ -463,6 +504,15 @@ class DesktopPhotoSource implements PhotoSource {
 
   @override
   Future<Uint8List?> readOriginal(String path) => _readBytes(path);
+
+  @override
+  Future<int?> originalLength(String path) async {
+    try {
+      return await File(path).length();
+    } catch (_) {
+      return null;
+    }
+  }
 
   @override
   Future<Uint8List?> makeThumbBytes(String path, {int maxDim = 256}) async {

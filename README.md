@@ -80,7 +80,7 @@
 export PATH=/opt/flutter/bin:$PATH
 flutter pub get
 flutter analyze
-flutter test                      # 89 项：OCR 回归 / 同步端到端 / 原图同步 / 复制图片 / 存储 / 扫描 / UI / 回归 / 启动与提示
+flutter test                      # 101 项：OCR 回归 / 同步端到端 / 原图同步 / 复制图片 / 存储 / 扫描 / UI / 回归 / 启动与提示
 flutter build apk --debug --target-platform=android-arm64
 ```
 

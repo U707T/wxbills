@@ -69,6 +69,7 @@ class SyncConfig {
     this.autoSync = true,
     this.lastSyncAt = 0,
     this.lastSyncMessage = '',
+    this.lastSyncOk = true,
   });
 
   final String url;
@@ -81,6 +82,12 @@ class SyncConfig {
   final int lastSyncAt;
   final String lastSyncMessage;
 
+  /// 上一次同步是否成功。
+  ///
+  /// 以前界面靠 `lastSyncMessage.contains('失败')` 判断，属于拿文案当状态：
+  /// 改一句措辞就会让图标失灵。现在成功与否是结构化字段，文案只负责显示。
+  final bool lastSyncOk;
+
   bool get configured => url.trim().isNotEmpty;
 
   SyncConfig copyWith({
@@ -91,6 +98,7 @@ class SyncConfig {
     bool? autoSync,
     int? lastSyncAt,
     String? lastSyncMessage,
+    bool? lastSyncOk,
   }) =>
       SyncConfig(
         url: url ?? this.url,
@@ -100,6 +108,7 @@ class SyncConfig {
         autoSync: autoSync ?? this.autoSync,
         lastSyncAt: lastSyncAt ?? this.lastSyncAt,
         lastSyncMessage: lastSyncMessage ?? this.lastSyncMessage,
+        lastSyncOk: lastSyncOk ?? this.lastSyncOk,
       );
 }
 
@@ -172,10 +181,17 @@ class BillStore {
 
   bool _loaded = false;
 
+  /// 数据文件读不出来时进入只读模式：本次运行**绝不写盘**。
+  ///
+  /// 否则「读失败 → 空账本 → 用户随手一次操作触发 save()」会把完好的
+  /// data.json 覆盖成空快照，这是整份代码里唯一能一次性抹掉全部记录的动作。
+  bool _readOnly = false;
+
   /// 数据文件损坏时的说明（启动后由界面提示用户「现场已备份到 …」）。
   String _loadWarning = '';
 
   bool get loaded => _loaded;
+  bool get readOnly => _readOnly;
   String get loadWarning => _loadWarning;
 
   /// 数据版本号：任何会改变「列表应该显示什么」的操作都会 +1。
@@ -237,10 +253,24 @@ class BillStore {
     _sync = const SyncConfig();
     _prefs = const UiPrefs();
     _loadWarning = '';
-    final json = await readJsonFile(
-      dirs.dataFile,
-      onCorrupt: (path) => _loadWarning = '数据文件损坏，已备份到 $path（本次以空账本启动）',
-    );
+    _readOnly = false;
+    Map<String, dynamic>? json;
+    try {
+      json = await readJsonFile(
+        dirs.dataFile,
+        onCorrupt: (path) => _loadWarning = '数据文件损坏，已备份到 $path（本次以空账本启动）',
+      );
+    } catch (e) {
+      // IO 失败（Windows 上被其他程序独占、目录权限被撤、磁盘掉线）：
+      // 不是「文件坏了」，是「这次没读到」。带着空账本继续跑并允许写盘，
+      // 下一次 save() 就会把原文件覆盖成空快照。
+      _readOnly = true;
+      _loaded = true;
+      _loadWarning = '数据文件读取失败（$e）。已进入只读模式，本次不会写入磁盘；'
+          '请关掉可能占用该文件的程序后重启应用';
+      _revision++;
+      return;
+    }
     if (json != null) {
       final bills = json['bills'];
       if (bills is List) {
@@ -269,6 +299,8 @@ class BillStore {
           autoSync: sync['auto'] != false,
           lastSyncAt: (sync['at'] as num?)?.toInt() ?? 0,
           lastSyncMessage: '${sync['msg'] ?? ''}',
+          // 老数据没有这个键：默认按「成功」处理，不要一升级就顶一个失败图标。
+          lastSyncOk: sync['ok'] != false,
         );
       }
       final prefs = json['prefs'];
@@ -288,6 +320,8 @@ class BillStore {
   Future<void>? _saving;
 
   Future<void> save() {
+    // 只读模式：读失败时内存里是空账本，写下去就是「静默清库」。
+    if (_readOnly) return Future<void>.value();
     final next = (_saving ?? Future<void>.value()).then((_) => _writeSnapshot());
     // 链本身吞掉错误：一次失败不能让后续所有 save 都变成 rejected
     _saving = next.catchError((Object _) {});
@@ -308,6 +342,7 @@ class BillStore {
         'auto': _sync.autoSync,
         'at': _sync.lastSyncAt,
         'msg': _sync.lastSyncMessage,
+        'ok': _sync.lastSyncOk,
       },
       'prefs': _prefs.toJson(),
     };
@@ -420,7 +455,23 @@ class BillStore {
     _revision++;
   }
 
-  /// 彻底清掉过期墓碑（默认 120 天），避免同步文件无限增长。
+  /// 按 id 彻底删除记录（同步侧清理过期墓碑时用）。
+  ///
+  /// 只负责「移除」，是否该清由调用方决定——单独清本机是无效的，
+  /// 下一次同步会把远端的墓碑合并回来（见 SyncEngine.run 的墓碑清理段）。
+  int dropBills(Iterable<String> ids) {
+    var removed = 0;
+    for (final id in ids) {
+      if (_bills.remove(id) != null) removed++;
+    }
+    if (removed > 0) _revision++;
+    return removed;
+  }
+
+  /// 彻底清掉过期墓碑（默认 120 天）。
+  ///
+  /// ⚠️ 只在**本机**清是没用的：同步会把远端的同名墓碑原样合并回来。
+  /// 生产代码不要在扫描里调它，过期墓碑的清理走 [SyncEngine.run]。
   int purgeTombstones({int olderThanMs = 120 * 24 * 3600 * 1000}) {
     final cutoff = DateTime.now().millisecondsSinceEpoch - olderThanMs;
     final gone = _bills.entries
@@ -441,8 +492,12 @@ class BillStore {
   }
 
   /// 把同步结果写回配置。
-  void recordSync(int at, String message) {
-    _sync = _sync.copyWith(lastSyncAt: at, lastSyncMessage: message);
+  void recordSync(int at, String message, {bool ok = true}) {
+    _sync = _sync.copyWith(
+      lastSyncAt: at,
+      lastSyncMessage: message,
+      lastSyncOk: ok,
+    );
   }
 
   // ---------------------------------------------------------------- 缩略图
@@ -528,19 +583,21 @@ class BillStore {
   /// 只动 `<support>/media/` 这份**副本**：记录里的本机原图（`path`）永远不碰。
   Future<int> pruneMedia() async {
     if (!await dirs.mediaDir.exists()) return 0;
+    // 以「记录引用的文件名」为准，而不是从文件名反推 id：
+    // 后者等于把 `<id>.<ext>` 这个约定硬编码进清理逻辑，任何命名变化
+    // （或旧数据、测试数据）都会把还在用的文件删掉。
+    final keep = <String>{
+      for (final b in _bills.values)
+        if (!b.deleted && b.photo.isNotEmpty) b.photo,
+    };
     var removed = 0;
     await for (final e in dirs.mediaDir.list()) {
       if (e is! File) continue;
-      final name = p.basename(e.path);
-      final dot = name.lastIndexOf('.');
-      final id = dot > 0 ? name.substring(0, dot) : name;
-      final bill = _bills[id];
-      if (bill == null || bill.deleted) {
-        try {
-          await e.delete();
-          removed++;
-        } catch (_) {}
-      }
+      if (keep.contains(p.basename(e.path))) continue;
+      try {
+        await e.delete();
+        removed++;
+      } catch (_) {}
     }
     return removed;
   }
@@ -548,19 +605,19 @@ class BillStore {
   /// 清掉没有对应记录（或记录已删）的缩略图。
   Future<int> pruneThumbs() async {
     if (!await dirs.thumbDir.exists()) return 0;
+    // 同 pruneMedia：按「记录引用的文件名」保留，别从文件名反推 id。
+    final keep = <String>{
+      for (final b in _bills.values)
+        if (!b.deleted && b.thumb.isNotEmpty) b.thumb,
+    };
     var removed = 0;
     await for (final e in dirs.thumbDir.list()) {
       if (e is! File) continue;
-      final name = p.basename(e.path);
-      final dot = name.lastIndexOf('.');
-      final id = dot > 0 ? name.substring(0, dot) : name;
-      final bill = _bills[id];
-      if (bill == null || bill.deleted) {
-        try {
-          await e.delete();
-          removed++;
-        } catch (_) {}
-      }
+      if (keep.contains(p.basename(e.path))) continue;
+      try {
+        await e.delete();
+        removed++;
+      } catch (_) {}
     }
     if (removed > 0) _revision++;
     return removed;

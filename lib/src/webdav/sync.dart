@@ -99,6 +99,14 @@ class SyncEngine {
 
   static const int _maxAttempts = 3;
 
+  /// 墓碑保留期：超过这个时间的删除记录，会随合并结果一起从远端快照里清掉。
+  /// 代价说清楚：离线超过 120 天的设备再上线，会把这些记录当成「远端没有」
+  /// 重新推回来——这是删除优先策略下无法避免的取舍。
+  static const int tombstoneTtlMs = 120 * 24 * 3600 * 1000;
+
+  /// 本轮文件同步因为「远端目录读不出来」而跳过的说明（空表示没跳过）。
+  String _mediaWarning = '';
+
   WebDavClient _client() {
     final cfg = store.sync;
     return WebDavClient(
@@ -117,6 +125,7 @@ class SyncEngine {
     if (!cfg.configured) return SyncResult.failure('还没有配置 WebDAV 服务器');
 
     final client = _client();
+    _mediaWarning = '';
     try {
       onProgress?.call(const SyncProgress('连接服务器…', 0, 1));
       final snapshotUrl = '${client.root}/$snapshotName';
@@ -168,6 +177,16 @@ class SyncEngine {
           );
         }
 
+        // 过期墓碑：必须从**合并结果**里清，而不是只清本机。
+        // 只清本机的话下一次同步会把远端那份原样合并回来，清理永远不生效。
+        final tombstoneCutoff =
+            DateTime.now().millisecondsSinceEpoch - tombstoneTtlMs;
+        final expired = merged.values
+            .where((b) => b.deleted && b.updatedAt < tombstoneCutoff)
+            .map((b) => b.id)
+            .toSet();
+        if (expired.isNotEmpty) merged.removeWhere((id, _) => expired.contains(id));
+
         // 本机被远端改动的条数（界面上的「拉取」）
         final pulled = merged.values.where((b) {
           final before = localBefore[b.id];
@@ -191,6 +210,8 @@ class SyncEngine {
         }).toList();
 
         store.putAll(changedLocal);
+        // 过期墓碑从本机也去掉（merged 里已经不再包含它们）。
+        store.dropBills(expired);
         await store.save();
 
         // ---------------------------------------------------------- 2. 原图
@@ -212,7 +233,11 @@ class SyncEngine {
         //  * 不能用「字节是否相同」判断 —— 快照里带 savedAt 时间戳，字节永远不同；
         //  * 也不能只看「本机是否变化」—— 本机已是最终版本时（例如刚被远端合并过）
         //    同样需要把结果推上去，否则这台设备的修改永远传不出去。
-        final needWrite = remote.bytes == null || toPush > 0;
+        // 远端还留着已被清掉的墓碑时也要写一次，否则远端快照永远瘦不下来。
+        final purgedOnRemote =
+            expired.where((id) => remoteBills.containsKey(id)).length;
+        final needWrite =
+            remote.bytes == null || toPush > 0 || purgedOnRemote > 0;
 
         var pushed = 0;
         if (needWrite) {
@@ -272,9 +297,16 @@ class SyncEngine {
           photosDown: photos.down,
           photosSkipped: photos.skipped,
           photosDirFlat: photosAreFlat,
+          warning: _mediaWarning,
+          etagUnsafe: remote.bytes != null &&
+              WebDavClient.strongEtag(remote.etag).isEmpty,
         );
-        store.recordSync(now, summary);
+        store.recordSync(now, summary, ok: true);
         await store.save();
+        // 删掉的记录（墓碑）不该继续占着缩略图/原图副本。以前只在扫描末尾清，
+        // 而扫描默认不会自动跑——这里顺手清一次，删完同步就释放空间。
+        await store.pruneThumbs();
+        await store.pruneMedia();
         onProgress?.call(SyncProgress('完成', 1, 1, message: summary));
         return SyncResult(
           ok: true,
@@ -290,12 +322,13 @@ class SyncEngine {
         );
       }
     } on WebDavException catch (e) {
-      store.recordSync(DateTime.now().millisecondsSinceEpoch, '同步失败：${e.message}');
+      store.recordSync(DateTime.now().millisecondsSinceEpoch, '同步失败：${e.message}',
+          ok: false);
       await store.save();
       return SyncResult.failure(e.message);
     } catch (e) {
       final msg = '同步失败：$e';
-      store.recordSync(DateTime.now().millisecondsSinceEpoch, msg);
+      store.recordSync(DateTime.now().millisecondsSinceEpoch, msg, ok: false);
       await store.save();
       return SyncResult.failure(msg);
     } finally {
@@ -421,30 +454,35 @@ class SyncEngine {
         if (!e.isDirectory) remote[e.name] = e;
       }
     } on WebDavException catch (e) {
-      if (e.status == 404) {
-        // 目录还不存在：建一次；建不出来就退化（和缩略图同一套兜底）。
-        var created = true;
+      if (e.status != 404) {
+        // 关键：不能把「列不出来」当成「远端是空的」——那会让每条记录都判定成
+        // 「远端没有 → 需要上传」，几百 MB 原图白传一遍，还可能全部写失败。
+        _mediaWarning =
+            '远端 $photosDirName 目录读取失败（${e.status ?? '网络错误'}），本轮跳过原图同步';
+        return (up: 0, down: 0, skipped: 0);
+      }
+      // 目录还不存在：建一次；建不出来就退化（和缩略图同一套兜底）。
+      var created = true;
+      try {
+        await client.ensureDir(base);
+      } on WebDavException {
+        created = false;
+      }
+      if (!created) {
+        flat = true;
+        photosAreFlat = true;
         try {
-          await client.ensureDir(base);
-        } on WebDavException {
-          created = false;
-        }
-        if (!created) {
-          flat = true;
-          photosAreFlat = true;
-          try {
-            for (final e in await client.list('${client.root}/')) {
-              if (e.isDirectory) continue;
-              if (e.name.startsWith(_flatPhotoPrefix)) {
-                remote[e.name.substring(_flatPhotoPrefix.length)] = e;
-              }
+          for (final e in await client.list('${client.root}/')) {
+            if (e.isDirectory) continue;
+            if (e.name.startsWith(_flatPhotoPrefix)) {
+              remote[e.name.substring(_flatPhotoPrefix.length)] = e;
             }
-          } on WebDavException {
-            // 列不出根目录就当远端全空，逐张补传
           }
+        } on WebDavException {
+          _mediaWarning = '远端目录列不出来，本轮跳过原图同步';
+          return (up: 0, down: 0, skipped: 0);
         }
       }
-      // 其他错误：当远端全空，逐张补传
     }
 
     var up = 0;
@@ -462,7 +500,7 @@ class SyncEngine {
       if (remoteEntry != null) {
         // 远端已有：把名字补进记录（另一台设备先传过、或老记录首次同步），
         // 本机没有副本就下载一份——复制时拿到的就是**原图**而不是缩略图。
-        if (b.photo != name) store.put(b.copyWith(photo: name));
+        if (b.photo != name) _markPhoto(b.id, name);
         if (localLength != null) continue;
         try {
           final got = await client.get(remoteEntry.url, limit: maxPhotoBytes);
@@ -478,6 +516,15 @@ class SyncEngine {
       }
 
       // 远端还没有：把本机原图传上去。
+      //
+      // 先问大小再读字节：超过上限的图正好是「最需要拦住的」，现在这个顺序
+      // 会先把几十 MB 读进堆再拒绝，Android 上就是 OOM。
+      final knownLength =
+          b.path.isEmpty ? null : await _photoSource?.originalLength(b.path);
+      if (knownLength != null && knownLength > maxPhotoBytes) {
+        skipped++;
+        continue;
+      }
       final bytes = await _readOriginalForUpload(b, name);
       if (bytes == null || bytes.isEmpty) continue;
       if (bytes.length > maxPhotoBytes) {
@@ -490,12 +537,24 @@ class SyncEngine {
       try {
         await client.put(target, bytes, contentType: _contentTypeOf(name));
         up++;
-        if (b.photo != name) store.put(b.copyWith(photo: name));
+        if (b.photo != name) _markPhoto(b.id, name);
       } on WebDavException {
         // 单张失败不影响整体
       }
     }
     return (up: up, down: down, skipped: skipped);
+  }
+
+  /// 给记录补上原图文件名。
+  ///
+  /// 必须按 id 重读当前记录再改：`_syncPhotos` 开头拍的 `liveBills` 快照可能已经
+  /// 过期（首轮同步要传几百 MB，几分钟里用户完全可能删掉或改掉某条记录）。
+  /// 用旧对象 `copyWith` 写回会把墓碑/手工金额一起覆盖掉。
+  void _markPhoto(String id, String name) {
+    final cur = store.byId(id);
+    // 已被删除的记录不要再动它：墓碑只需要同步删除，不需要原图文件名。
+    if (cur == null || cur.deleted || cur.photo == name) return;
+    store.put(cur.copyWith(photo: name));
   }
 
   /// 上传用的字节：先用记录里的本机原图（Android 走 SAF / 桌面走文件系统），
@@ -561,32 +620,35 @@ class SyncEngine {
         if (!e.isDirectory) remote[e.name] = e;
       }
     } on WebDavException catch (e) {
-      if (e.status == 404) {
-        // 目录还不存在：建一次。建不出来就退化——有些网盘（坚果云）
-        // 允许直接写文件，但 MKCOL 被拒；此时把缩略图放到快照同目录，
-        // 文件名加 thumb_ 前缀，功能不受影响。
-        var created = true;
+      if (e.status != 404) {
+        _mediaWarning = '远端 $thumbsDirName 目录读取失败'
+            '（${e.status ?? '网络错误'}），本轮跳过缩略图同步';
+        return (0, 0);
+      }
+      // 目录还不存在：建一次。建不出来就退化——有些网盘（坚果云）
+      // 允许直接写文件，但 MKCOL 被拒；此时把缩略图放到快照同目录，
+      // 文件名加 thumb_ 前缀，功能不受影响。
+      var created = true;
+      try {
+        await client.ensureDir(base);
+      } on WebDavException {
+        created = false;
+      }
+      if (!created) {
+        flat = true;
+        thumbsAreFlat = true;
         try {
-          await client.ensureDir(base);
-        } on WebDavException {
-          created = false;
-        }
-        if (!created) {
-          flat = true;
-          thumbsAreFlat = true;
-          try {
-            for (final e in await client.list('${client.root}/')) {
-              if (e.isDirectory) continue;
-              if (e.name.startsWith(_flatPrefix)) {
-                remote[e.name.substring(_flatPrefix.length)] = e;
-              }
+          for (final e in await client.list('${client.root}/')) {
+            if (e.isDirectory) continue;
+            if (e.name.startsWith(_flatPrefix)) {
+              remote[e.name.substring(_flatPrefix.length)] = e;
             }
-          } on WebDavException {
-            // 列不出根目录就当远端全空，逐张补传即可
           }
+        } on WebDavException {
+          _mediaWarning = '远端目录列不出来，本轮跳过缩略图同步';
+          return (0, 0);
         }
       }
-      // 其他错误：当远端全空，逐个补传
     }
 
     var up = 0;
@@ -611,15 +673,13 @@ class SyncEngine {
         } on WebDavException {
           // 单张失败不影响整体
         }
-      } else {
-        // 远端没有 → 补传；远端有但字节数不同 → 覆盖（缩略图文件名固定是
-        // `<id>.jpg`，「重新识别全部」换了内容后只有靠长度才能发现不一致）。
-        // 服务端没给 content-length（size < 0）时无法判断，宁可不动，避免每轮都写。
-        final missing = remoteEntry == null;
-        final changed = remoteEntry != null &&
-            remoteEntry.size >= 0 &&
-            remoteEntry.size != localLength;
-        if (!missing && !changed) continue;
+      } else if (remoteEntry == null) {
+        // 远端没有 → 补传。
+        //
+        // 反向（远端有、本地也有但内容不同）**不再上传**，改为以远端为准下载：
+        // 缩略图是原图的派生物，两端生成器不同（Android 系统缩略图 / Windows
+        // image 包 q82）长度天然不等。以前「长度不同就覆盖」会让两台机器每轮
+        // 都把全部缩略图互相覆盖一遍，永远收敛不了。现在每对文件最多同步一次。
         final local = await store.readThumb(b.thumb);
         if (local == null) continue;
         final target = flat
@@ -630,6 +690,18 @@ class SyncEngine {
           up++;
         } on WebDavException {
           // 忽略单张失败
+        }
+      } else if (remoteEntry.size >= 0 && remoteEntry.size != localLength) {
+        // 远端版本不同：拉回来覆盖本地，一轮之后两边一致。
+        try {
+          final got = await client.get(remoteEntry.url);
+          final bytes = got.bytes;
+          if (bytes != null && bytes.isNotEmpty) {
+            await store.writeThumb(b.thumb, bytes);
+            down++;
+          }
+        } on WebDavException {
+          // 单张失败不影响整体
         }
       }
     }
@@ -654,9 +726,18 @@ class SyncEngine {
     if (bytes == null || bytes.isEmpty) return {};
     try {
       final decoded = jsonDecode(utf8.decode(bytes));
-      if (decoded is! Map) return {};
+      // 「文件是空的」和「文件里不是本应用的数据」必须分开处理：
+      // 前者可以当成全新远端，后者一旦当成空，就会用本机数据覆盖别人/别版本的文件。
+      if (decoded is! Map) {
+        throw WebDavException('远端 bills.json 顶层不是对象，已中止以免覆盖它');
+      }
+      if (!decoded.containsKey('bills')) {
+        throw WebDavException('远端 bills.json 不是本应用的格式（缺少 bills 字段），已中止');
+      }
       final list = decoded['bills'];
-      if (list is! List) return {};
+      if (list is! List) {
+        throw WebDavException('远端 bills.json 的 bills 字段不是数组，已中止以免覆盖它');
+      }
       final out = <String, Bill>{};
       for (final item in list) {
         if (item is! Map) continue;
@@ -664,6 +745,8 @@ class SyncEngine {
         if (bill.id.isNotEmpty) out[bill.id] = bill;
       }
       return out;
+    } on WebDavException {
+      rethrow;
     } catch (_) {
       // 远端文件损坏：不覆盖它，本次按「远端为空」合并会把它写坏，
       // 所以这里抛出去让上层中止更安全。
@@ -693,6 +776,8 @@ class SyncEngine {
     int photosDown = 0,
     int photosSkipped = 0,
     bool photosDirFlat = false,
+    String warning = '',
+    bool etagUnsafe = false,
   }) {
     final parts = <String>[];
     if (pushed > 0) parts.add('上传 $pushed 条');
@@ -708,6 +793,11 @@ class SyncEngine {
     if (thumbsDirFlat) parts.add('缩略图与记录同目录（该网盘不能建子目录）');
     if (photosDirFlat && (photosUp > 0 || photosDown > 0)) {
       parts.add('原图与记录同目录（该网盘不能建子目录）');
+    }
+    if (warning.isNotEmpty) parts.add(warning);
+    if (etagUnsafe) {
+      // 没有 ETag 时 If-Match 发不出去，等于裸写。不能悄悄降级。
+      parts.add('该服务器未提供 ETag，本次写入没有并发保护');
     }
     return parts.isEmpty ? '已是最新，无需同步' : '同步完成：${parts.join('，')}';
   }

@@ -160,8 +160,9 @@ class AppController extends ChangeNotifier {
     _notify();
     if (store.loadWarning.isNotEmpty) showToast(store.loadWarning);
 
-    if (store.folders.isEmpty) return;
-    if (store.prefs.autoScanOnBoot) {
+    // 「有没有相册目录」只决定要不要扫描，不该连同步一起跳过：
+    // 新设备先填同步地址、还没导入相册时，正是最需要拉一次远端数据的时候。
+    if (store.folders.isNotEmpty && store.prefs.autoScanOnBoot) {
       await scan(force: false, silent: true);
     }
     if (store.sync.configured && store.sync.autoSync) {
@@ -339,6 +340,17 @@ class AppController extends ChangeNotifier {
     _notify();
     _persist();
     _scheduleAutoSync();
+    // 顺手把这条记录的缩略图/原图副本清掉（不等下一次扫描）
+    unawaited(_pruneMediaLater());
+  }
+
+  Future<void> _pruneMediaLater() async {
+    try {
+      await store.pruneThumbs();
+      await store.pruneMedia();
+    } catch (_) {
+      // 清理失败不影响删除本身
+    }
   }
 
   Future<void> _persist() async {
@@ -465,30 +477,6 @@ class AppController extends ChangeNotifier {
     unawaited(runSync(silent: true));
   }
 
-  Future<void> recheckOne(String id) async {
-    final bill = store.byId(id);
-    if (bill == null || bill.path.isEmpty) return;
-    _setBusy(true, '重新识别…', 0);
-    try {
-      final r = await scanner.readOne(bill.path);
-      _setBusy(false, '', 0);
-      if (r.text == null) {
-        showToast('这张没认出来，请手动填写金额');
-        return;
-      }
-      final cents = Bill.centsFromYuan(r.value);
-      store.setAmount(id, cents);
-      _notify();
-      await _persist();
-      showToast('识别到 ¥${Bill.formatCents(cents ?? 0)}'
-          '（置信度 ${(r.confidence * 100).toStringAsFixed(0)}%）');
-      _scheduleAutoSync();
-    } catch (e) {
-      _setBusy(false, '', 0);
-      showToast('识别失败：$e');
-    }
-  }
-
   // ---------------------------------------------------------------- 刷新日期
 
   Future<void> refreshDates(List<Bill> list) async {
@@ -508,38 +496,49 @@ class AppController extends ChangeNotifier {
     // （那会让「扫描识别」按钮永久变灰、点了没反应）。
     var ok = 0;
     var fail = 0;
+    var skipped = 0;
     final failures = <String>[];
     try {
-    for (var i = 0; i < list.length; i++) {
-      if (_cancelRequested) break;
-      final b = list[i];
-      if (b.path.isEmpty) {
-        fail++;
-        continue;
-      }
-      final folder = store.folderOf(b);
-      final r = await source.refreshDate(b.path, folder?.path);
-      if (r.ok) {
-        ok++;
-        // 走「重建新文件」路线时路径会变，必须回写，否则记录失效
-        if (r.newPath.isNotEmpty && r.newPath != b.path) {
-          store.put(b.copyWith(
-            path: r.newPath,
-            updatedAt: DateTime.now().millisecondsSinceEpoch,
-          ));
+      for (var i = 0; i < list.length; i++) {
+        if (_cancelRequested) break;
+        // 列表是点击那一刻的快照：这期间用户可能删了记录、也可能改了金额。
+        // 一律按 id 重读当前值，绝不拿旧对象 copyWith 写回（那会把墓碑覆盖成未删除，
+        // 而且 updatedAt 会被刷成现在，合并时连其他设备的墓碑都会输给它）。
+        final cur = store.byId(list[i].id);
+        if (cur == null || cur.deleted) {
+          skipped++;
+          continue;
         }
-      } else {
-        fail++;
-        if (failures.length < 3) {
-          final reason = r.message.isNotEmpty ? r.message : r.diagnosis;
-          failures.add(reason.isEmpty ? b.name : '${b.name}：$reason');
+        if (cur.path.isEmpty) {
+          fail++;
+          continue;
         }
+        // 目录可能已被移除（记录还留着）。此时 folder 为 null，但原生侧
+        // 还有「所有文件访问权限」那条路线可以不靠 treeUri 生效，
+        // 所以不能在这里直接跳过——只把拿得到的目录传下去。
+        final folder = store.folderOf(cur);
+        final r = await source.refreshDate(cur.path, folder?.path);
+        if (r.ok) {
+          ok++;
+          // 走「重建新文件」路线时路径会变，必须回写，否则记录失效
+          if (r.newPath.isNotEmpty && r.newPath != cur.path) {
+            store.put(cur.copyWith(
+              path: r.newPath,
+              updatedAt: DateTime.now().millisecondsSinceEpoch,
+            ));
+            // 原生侧是先删旧文件再返回新路径的：这里必须立刻落盘，
+            // 否则中途被杀，记录就指向一个已不存在的文件（下次扫描会打墓碑）。
+            await store.save();
+          }
+        } else {
+          fail++;
+          if (failures.length < 3) {
+            final reason = r.message.isNotEmpty ? r.message : r.diagnosis;
+            failures.add(reason.isEmpty ? cur.name : '${cur.name}：$reason');
+          }
+        }
+        _setBusyThrottled('刷新 ${i + 1}/${list.length}', (i + 1) / list.length);
       }
-      // 每 10 张落一次盤：中途被杀时已回写的 path 不能丢，否则下次扫描会把
-      // 这些记录当成「文件已消失」而打墓碑。
-      if (i % 10 == 9) await store.save();
-      _setBusyThrottled('刷新 ${i + 1}/${list.length}', (i + 1) / list.length);
-    }
     } catch (e) {
       showToast('刷新中断：$e');
     } finally {
@@ -547,10 +546,13 @@ class AppController extends ChangeNotifier {
       await store.save();
       _setBusy(false, '', 0);
       _notify();
-      final stopped = _cancelRequested && ok + fail < list.length;
+      final stopped = _cancelRequested && ok + fail + skipped < list.length;
       final detail = failures.isEmpty ? '' : '（${failures.join('；')}）';
       showToast('已刷新 $ok 张${fail > 0 ? '，$fail 张失败' : ''}'
+          '${skipped > 0 ? '，$skipped 张已删除已跳过' : ''}'
           '${stopped ? '，已停止' : ''}$detail');
+      // 刷新期间被挡住的同步请求，这里补跑（同 scan 的处理）
+      _flushQueuedSync();
     }
   }
 
@@ -612,13 +614,15 @@ class AppController extends ChangeNotifier {
     } catch (e) {
       _setBusy(false, '', 0);
       showToast('同步失败：$e');
+    } finally {
+      // 同步期间到达的请求（改数据后 8 秒触发的那次）必须补跑，
+      // 否则它会被静默丢掉，用户的修改一直留在本机。
+      _flushQueuedSync();
     }
   }
 
   /// 最近一次同步是否失败（启动时的静默同步失败不弹提示，靠这个标记告诉界面）。
-  bool get syncFailed =>
-      store.sync.configured &&
-      store.sync.lastSyncMessage.contains('失败');
+  bool get syncFailed => store.sync.configured && !store.sync.lastSyncOk;
 
   void _scheduleAutoSync() {
     if (!store.sync.configured || !store.sync.autoSync) return;

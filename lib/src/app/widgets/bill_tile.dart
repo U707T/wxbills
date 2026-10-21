@@ -19,6 +19,7 @@ class BillTile extends StatelessWidget {
     required this.onRefresh,
     required this.onCopy,
     required this.onDelete,
+    this.enabled = true,
   });
 
   final Bill bill;
@@ -30,6 +31,10 @@ class BillTile extends StatelessWidget {
   /// 复制这张图到剪贴板（桌面端用它顶替 Android 的「刷新日期」）。
   final VoidCallback onCopy;
   final VoidCallback onDelete;
+
+  /// 扫描 / 同步 / 刷新日期在跑时置 false：那时后台正在批量改写账本，
+  /// 这一行上的编辑与删除会被批处理的旧快照覆盖，干脆先不让点。
+  final bool enabled;
 
   @override
   Widget build(BuildContext context) {
@@ -98,7 +103,7 @@ class BillTile extends StatelessWidget {
           const SizedBox(width: 6),
           if (controller.source.supportsRefreshDate)
             IconButton(
-              onPressed: onRefresh,
+              onPressed: enabled ? onRefresh : null,
               tooltip: '刷新这张图片的日期（让 QQ/相册当成新图）',
               icon: const Icon(Icons.refresh_rounded, size: 18),
               style: IconButton.styleFrom(
@@ -110,7 +115,7 @@ class BillTile extends StatelessWidget {
             )
           else if (controller.source.supportsCopyImage)
             IconButton(
-              onPressed: onCopy,
+              onPressed: enabled ? onCopy : null,
               tooltip: '复制图片（可直接粘贴到聊天窗口；本机没有原图时复制缩略图）',
               icon: const Icon(Icons.content_copy_rounded, size: 17),
               style: IconButton.styleFrom(
@@ -121,8 +126,8 @@ class BillTile extends StatelessWidget {
               ),
             ),
           IconButton(
-            onPressed: onDelete,
-            tooltip: '删除记录',
+            onPressed: enabled ? onDelete : null,
+            tooltip: enabled ? '删除记录' : '正在扫描/同步，完成后再操作',
             icon: const Icon(Icons.delete_outline_rounded, size: 18),
             style: IconButton.styleFrom(
               foregroundColor: dark ? Palette.darkTextDim : Palette.textDim,
@@ -152,7 +157,7 @@ class BillTile extends StatelessWidget {
         color: Colors.transparent,
         child: InkWell(
           borderRadius: BorderRadius.circular(12),
-          onTap: onEdit,
+          onTap: enabled ? onEdit : null,
           child: content,
         ),
       ),

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -43,6 +45,16 @@ class _BillsPageState extends State<BillsPage> {
 
   bool _searchHadText = false;
 
+  /// 输入防抖：每敲一个字就全量过滤 + 排序 + 整页重建，几百条时会明显掉帧。
+  Timer? _queryDebounce;
+
+  void _onQueryChanged(String value) {
+    _queryDebounce?.cancel();
+    _queryDebounce = Timer(const Duration(milliseconds: 200), () {
+      c.setQuery(value);
+    });
+  }
+
   void _onSearchChanged() {
     final has = _searchCtrl.text.isNotEmpty;
     if (has == _searchHadText) return;
@@ -53,6 +65,7 @@ class _BillsPageState extends State<BillsPage> {
   @override
   void dispose() {
     c.removeListener(_onChanged);
+    _queryDebounce?.cancel();
     _searchCtrl.removeListener(_onSearchChanged);
     _searchCtrl.dispose();
     _scrollCtrl.dispose();
@@ -68,6 +81,9 @@ class _BillsPageState extends State<BillsPage> {
   // ---------------------------------------------------------------- 定位
 
   Future<void> _locate() async {
+    // 防抖可能还没把最新输入交给 controller（例如输入后立刻按回车），
+    // 定位前先同步一次，保证「看到的输入」和「筛选结果」是同一份。
+    c.setQuery(_searchCtrl.text);
     final id = c.locateByAmount(_searchCtrl.text);
     if (id == null) return;
     FocusScope.of(context).unfocus();
@@ -123,10 +139,6 @@ class _BillsPageState extends State<BillsPage> {
       builder: (_) => _AmountDialog(bill: bill),
     );
     if (result == null) return;
-    if (result.kind == _EditKind.invalid) {
-      c.showToast('金额格式不对');
-      return;
-    }
     // cleared = 撤回这次识别，回到「未识别」；value = 正常落盘
     c.setAmount(
       bill.id,
@@ -295,6 +307,9 @@ class _BillsPageState extends State<BillsPage> {
                         key: _itemKeys[b.id],
                         child: BillTile(
                           bill: b,
+                          // 后台批量改写账本时不接受逐条编辑：
+                          // 那会把用户刚改的金额/刚删的记录用旧快照覆盖回去。
+                          enabled: !c.busy,
                           flashing: c.flashId == b.id,
                           controller: c,
                           onEdit: () => _editBill(b),
@@ -347,7 +362,7 @@ class _BillsPageState extends State<BillsPage> {
                   child: TextField(
                     controller: _searchCtrl,
                     focusNode: _searchFocus,
-                    onChanged: c.setQuery,
+                    onChanged: _onQueryChanged,
                     onSubmitted: (_) => _locate(),
                     style: const TextStyle(fontSize: 13.5),
                     decoration: InputDecoration(
@@ -482,9 +497,6 @@ enum _EditKind {
 
   /// 合法金额。
   value,
-
-  /// 文本解析不出金额（提示格式错误，不落盘）。
-  invalid,
 }
 
 class _EditResult {
@@ -517,6 +529,9 @@ class _AmountDialogState extends State<_AmountDialog> {
   late final TextEditingController _note =
       TextEditingController(text: widget.bill.note);
 
+  /// 非法输入的提示。以前是「关掉对话框再弹 toast」——用户刚敲的数字跟着一起没了。
+  String? _error;
+
   @override
   void dispose() {
     _amount.dispose();
@@ -532,10 +547,12 @@ class _AmountDialogState extends State<_AmountDialog> {
       return;
     }
     final cents = Bill.parseYuan(raw);
-    Navigator.pop(
-      context,
-      _EditResult(cents == null ? _EditKind.invalid : _EditKind.value, cents, note),
-    );
+    if (cents == null) {
+      // 留在对话框里，把输入还给他改
+      setState(() => _error = '金额格式不对：最多 7 位整数 + 2 位小数');
+      return;
+    }
+    Navigator.pop(context, _EditResult(_EditKind.value, cents, note));
   }
 
   @override
@@ -555,9 +572,13 @@ class _AmountDialogState extends State<_AmountDialog> {
               inputFormatters: [
                 FilteringTextInputFormatter.allow(RegExp(r'[0-9.]')),
               ],
-              decoration: const InputDecoration(
+              onChanged: (_) {
+                if (_error != null) setState(() => _error = null);
+              },
+              decoration: InputDecoration(
                 prefixText: '¥ ',
                 hintText: '例如 24.50',
+                errorText: _error,
               ),
               style: amountStyle(context, size: 19),
               onSubmitted: (_) => _submit(),
