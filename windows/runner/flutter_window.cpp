@@ -152,6 +152,15 @@ void FlutterWindow::OnWindowMethodCall(
     return;
   }
 
+  if (method == "snapToTop") {
+    // 「贴到顶部」是唯一的贴边入口：Windows 的 Aero Snap 让"拖到顶边"这个
+    // 手势不可用（会直接最大化），所以只能点一下
+    if (dock_) dock_->SnapToTop();
+    PersistWindowState();
+    result->Success();
+    return;
+  }
+
   result->NotImplemented();
 }
 

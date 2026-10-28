@@ -241,21 +241,31 @@ void main() {
 
     await tester.pumpWidget(WxBillsApp(controller: controller));
     await tester.pumpAndSettle();
+
+    // 贴顶按钮只在 Windows + 贴边隐藏开着的时候出现（Aero Snap 让拖拽不可用，
+    // 没有这个入口等于功能不存在）
+    expect(find.byIcon(Icons.vertical_align_top), findsOneWidget);
+    await tester.tap(find.byIcon(Icons.vertical_align_top));
+    await tester.pumpAndSettle();
+    expect(calls.where((c) => c.method == 'snapToTop'), isNotEmpty,
+        reason: '点 ⬆ 必须真的让 runner 把窗口挪到顶部');
+
     await tester.tap(find.byIcon(Icons.settings_outlined));
     await tester.pumpAndSettle();
 
     // 设置页是个长 ListView：窗口卡片在文件夹卡片下面，得先滚出来
+    const edgeTitle = '贴边隐藏（只贴屏幕顶部）';
     await tester.scrollUntilVisible(
-      find.text('贴边隐藏'),
+      find.text(edgeTitle),
       240,
       scrollable: find.byType(Scrollable).first,
     );
     expect(find.text('窗口（Windows）'), findsOneWidget);
-    expect(find.text('贴边隐藏'), findsOneWidget);
+    expect(find.text(edgeTitle), findsOneWidget);
     expect(controller.windowPrefs.edgeHide, isTrue);
 
     // 关掉（true → false）：既验界面能切，也验真的把新值发给了原生
-    final tile = find.widgetWithText(SwitchListTile, '贴边隐藏');
+    final tile = find.widgetWithText(SwitchListTile, edgeTitle);
     // scrollUntilVisible 只保证"露出来一点"，点之前先滚到完整可见
     await tester.ensureVisible(tile);
     await tester.pumpAndSettle();
@@ -282,11 +292,11 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('WebDAV 同步'), findsOneWidget);
-    // 滚到底也找不到：这张卡只在 Windows 上存在
+    // 贴顶按钮和窗口卡片都只在 Windows 上存在
     await tester.drag(find.byType(ListView), const Offset(0, -4000));
     await tester.pumpAndSettle();
     expect(find.text('窗口（Windows）'), findsNothing);
-    expect(find.text('贴边隐藏'), findsNothing);
+    expect(find.text('贴边隐藏（只贴屏幕顶部）'), findsNothing);
 
     await cleanup(tester, tmp);
   });

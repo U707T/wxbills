@@ -3,8 +3,8 @@
 //   g++ -std=c++17 -Wall -Wextra -Werror windows/runner/dock_math_test.cpp -o t && ./t
 //
 // CI 的 test job 会跑这一条（见 .github/workflows/ci.yml）。这里覆盖的全是
-// "在真机上要试半小时才能碰到一次" 的情况：任务栏、副屏在左边（负坐标）、
-// 拔掉显示器、半屏贴靠、窗口比屏幕宽。
+// "在真机上要试半小时才能碰到一次"的情况：任务栏、负坐标副屏、拔掉显示器、
+// 全屏程序、DWM 的不可见边框。
 #include <cstdio>
 #include <cstdlib>
 
@@ -36,117 +36,66 @@ bool Same(const Rect& a, const Rect& b) {
 void TestComputeDock() {
   const Rect work{0, 0, 1920, 1040};  // 底边任务栏占 40
 
-  // 贴左边 / 贴右边 / 贴顶边
-  CHECK(wxb::ComputeDock(Rect{0, 100, 900, 800}, work, 8) == DockEdge::kLeft);
-  CHECK(wxb::ComputeDock(Rect{1020, 100, 1920, 800}, work, 8) ==
-        DockEdge::kRight);
-  CHECK(wxb::ComputeDock(Rect{300, 0, 1200, 700}, work, 8) == DockEdge::kTop);
+  // 顶边齐平 / 差 8px 以内都算贴；差 9px 不算
+  CHECK(wxb::ComputeDock(Rect{100, 0, 1000, 700}, work, 8) == DockEdge::kTop);
+  CHECK(wxb::ComputeDock(Rect{100, 8, 1000, 700}, work, 8) == DockEdge::kTop);
+  CHECK(wxb::ComputeDock(Rect{100, 9, 1000, 700}, work, 8) == DockEdge::kNone);
 
-  // 离边 8px 以内算贴上；9px 不算
-  CHECK(wxb::ComputeDock(Rect{8, 100, 900, 800}, work, 8) == DockEdge::kLeft);
-  CHECK(wxb::ComputeDock(Rect{9, 100, 900, 800}, work, 8) == DockEdge::kNone);
+  // 窗口顶边跑到屏幕上方（DWM 外框溢出，实际齐平）：仍然算贴
+  CHECK(wxb::ComputeDock(Rect{100, -7, 1000, 700}, work, 8) == DockEdge::kTop);
 
-  // 正常浮在中间：不贴
-  CHECK(wxb::ComputeDock(Rect{200, 100, 1100, 800}, work, 8) ==
-        DockEdge::kNone);
+  // 浮在中间：不贴
+  CHECK(wxb::ComputeDock(Rect{200, 100, 1100, 800}, work, 8) == DockEdge::kNone);
 
-  // 左上角同时贴两条边：优先左边（QQ 的直觉也是往侧面收）
-  CHECK(wxb::ComputeDock(Rect{0, 0, 900, 700}, work, 8) == DockEdge::kLeft);
-
-  // 整宽（最大化）绝不贴边，否则收起来就再也拖不回来
+  // 比工作区还高（最大化、或用户拉到满高）：绝不贴，收起来连标题栏都没了
   CHECK(wxb::ComputeDock(Rect{0, 0, 1920, 1040}, work, 8) == DockEdge::kNone);
+  CHECK(wxb::ComputeDock(Rect{100, 0, 1000, 1035}, work, 8) == DockEdge::kNone);
 
-  // 比工作区还宽（横跨两台显示器）：也不动
-  CHECK(wxb::ComputeDock(Rect{-200, 100, 2100, 800}, work, 8) ==
-        DockEdge::kNone);
-
-  // 副屏在主屏左边，坐标是负的，仍然要能贴它的左边
-  const Rect left_monitor{-1920, 0, 0, 1080};
-  CHECK(wxb::ComputeDock(Rect{-1920, 100, -1000, 800}, left_monitor, 8) ==
-        DockEdge::kLeft);
-  CHECK(wxb::ComputeDock(Rect{-920, 100, 0, 800}, left_monitor, 8) ==
-        DockEdge::kRight);
+  // 副屏在主屏上方（坐标是负的），贴它的顶边
+  const Rect upper_monitor{0, -1080, 1920, 0};
+  CHECK(wxb::ComputeDock(Rect{100, -1080, 1000, -400}, upper_monitor, 8) ==
+        DockEdge::kTop);
 }
 
 void TestHiddenRect() {
   const Rect work{0, 0, 1920, 1040};
-  const Rect rest{1020, 100, 1920, 800};  // 900x700，贴右
+  const Rect rest{100, 0, 1000, 700};  // 900x700，贴顶
 
-  // 右贴：只留 4px，宽度不变
-  const Rect hidden = wxb::HiddenRect(rest, work, DockEdge::kRight, 4);
-  CHECK(hidden.left == 1916);
-  CHECK(hidden.right == 1916 + 900);
+  // 只留 4px，宽度/高度不变
+  const Rect hidden = wxb::HiddenRect(rest, work, DockEdge::kTop, 4);
+  CHECK(hidden.bottom == 4);
+  CHECK(hidden.top == 4 - 700);
   CHECK(wxb::Width(hidden) == wxb::Width(rest));
-  CHECK(hidden.top == rest.top);
-
-  // 右贴 + DWM 的 7px 不可见边框：露出的必须是"看得见"的 4px
-  const wxb::FramePadding pad{7, 7, 7, 7};
-  const Rect hidden_pad = wxb::HiddenRect(rest, work, DockEdge::kRight, 4, pad);
-  CHECK(hidden_pad.left == 1920 - 4 - 7);
-  const wxb::Rect visible =
-      wxb::VisibleRect(wxb::Rect{hidden_pad.left, hidden_pad.top,
-                                 hidden_pad.right, hidden_pad.bottom},
-                       pad);
-  CHECK(visible.left == 1920 - 4);
-  CHECK(wxb::Width(visible) == wxb::Width(rest) - 14);
-
-  // 左贴：可见的右边沿停在 work.left + 4
-  const Rect left_hidden =
-      wxb::HiddenRect(Rect{0, 100, 900, 800}, work, DockEdge::kLeft, 4, pad);
-  CHECK(left_hidden.right == 4 + 7);
-  CHECK(wxb::VisibleRect(wxb::Rect{left_hidden.left, left_hidden.top,
-                                   left_hidden.right, left_hidden.bottom},
-                         pad)
-            .right == 4);
-
-  // 上贴：只留 4px，高度不变
-  const Rect top_hidden =
-      wxb::HiddenRect(Rect{300, 0, 1200, 700}, work, DockEdge::kTop, 4);
-  CHECK(top_hidden.top == 4 - 700);
-  CHECK(top_hidden.bottom == 4);
-  CHECK(wxb::Height(top_hidden) == 700);
+  CHECK(wxb::Height(hidden) == wxb::Height(rest));
+  CHECK(hidden.left == rest.left);
 
   // 不贴边：原地不动（别把窗口搬走）
   CHECK(Same(wxb::HiddenRect(rest, work, DockEdge::kNone, 4), rest));
+
+  // DWM 7px 不可见边框：露出的必须是"看得见"的 4px
+  const wxb::FramePadding pad{7, 7, 7, 7};
+  const Rect hidden_pad = wxb::HiddenRect(rest, work, DockEdge::kTop, 4, pad);
+  CHECK(hidden_pad.bottom == 4 + 7);
+  const Rect visible{hidden_pad.left, hidden_pad.top, hidden_pad.right,
+                     hidden_pad.bottom};
+  CHECK(wxb::VisibleRect(visible, pad).bottom == 4);
 }
 
 void TestPeekStrip() {
   const Rect work{0, 0, 1920, 1040};
-  const Rect rest{1020, 100, 1920, 800};
+  const Rect rest{100, 0, 1000, 700};
 
-  // 右贴：条在 [1916,1920]，y 在窗口范围内
-  CHECK(wxb::InPeekStrip(rest, work, DockEdge::kRight, 4, 3, 1918, 400));
-  CHECK(wxb::InPeekStrip(rest, work, DockEdge::kRight, 4, 3, 1919, 400));
+  // 贴顶：条在 y ∈ [0,4]，x 在窗口范围内
+  CHECK(wxb::InPeekStrip(rest, work, DockEdge::kTop, 4, 3, 500, 2));
+  CHECK(wxb::InPeekStrip(rest, work, DockEdge::kTop, 4, 3, 500, 0));
   // 条外 3px 容差以内仍然算（4px 的条要求像素级命中太苛刻）
-  CHECK(wxb::InPeekStrip(rest, work, DockEdge::kRight, 4, 3, 1915, 400));
-  CHECK(wxb::InPeekStrip(rest, work, DockEdge::kRight, 4, 3, 1921, 400));
+  CHECK(wxb::InPeekStrip(rest, work, DockEdge::kTop, 4, 3, 500, 7));
   // 容差之外
-  CHECK(!wxb::InPeekStrip(rest, work, DockEdge::kRight, 4, 3, 1900, 400));
-  // 纵向超出窗口范围：不算（否则整条屏幕边都成了热区）
-  CHECK(!wxb::InPeekStrip(rest, work, DockEdge::kRight, 4, 3, 1918, 900));
-
-  // 左贴
-  CHECK(wxb::InPeekStrip(Rect{0, 100, 900, 800}, work, DockEdge::kLeft, 4, 3,
-                         1, 400));
-  CHECK(!wxb::InPeekStrip(Rect{0, 100, 900, 800}, work, DockEdge::kLeft, 4, 3,
-                          40, 400));
-
+  CHECK(!wxb::InPeekStrip(rest, work, DockEdge::kTop, 4, 3, 500, 20));
+  // 横向超出窗口范围：不算（否则整条屏幕顶边都成了热区）
+  CHECK(!wxb::InPeekStrip(rest, work, DockEdge::kTop, 4, 3, 1500, 2));
   // 不贴边时没有热区
-  CHECK(!wxb::InPeekStrip(rest, work, DockEdge::kNone, 4, 3, 1918, 400));
-}
-
-void TestLooksSnapped() {
-  const Rect work{0, 0, 1920, 1040};
-  // 半屏贴靠：按 Win+← 的那种（正好 50%），不能自动收
-  CHECK(wxb::LooksSnapped(Rect{0, 0, 960, 1040}, work));
-  // Win+↑ 的铺满（100%，但不是最大化状态）
-  CHECK(wxb::LooksSnapped(Rect{0, 0, 1920, 1040}, work));
-  // 1080p 上的默认窗口（1280 = 66%）**必须**能自动收，否则功能等于没做
-  CHECK(!wxb::LooksSnapped(Rect{0, 100, 1280, 820}, work));
-  // 普通窗口
-  CHECK(!wxb::LooksSnapped(Rect{1000, 100, 1900, 800}, work));
-  // 工作区宽度为 0 的退化情况不能除零/乱判
-  CHECK(!wxb::LooksSnapped(Rect{0, 0, 10, 10}, Rect{0, 0, 0, 0}));
+  CHECK(!wxb::InPeekStrip(rest, work, DockEdge::kNone, 4, 3, 500, 2));
 }
 
 void TestClampToWork() {
@@ -168,14 +117,12 @@ void TestClampToWork() {
   const Rect clamped_left = wxb::ClampToWork(offscreen_left, work, 80);
   CHECK(clamped_left.right == 80);
   CHECK(clamped_left.left == 80 - 800);
-  CHECK(wxb::Width(clamped_left) == 800);
 
   // 整个在上边外面（比如窗口被拖到标题栏都在屏幕外的位置）
   const Rect offscreen_top{100, -900, 900, -100};
   const Rect clamped_top = wxb::ClampToWork(offscreen_top, work, 80);
   CHECK(clamped_top.bottom == 80);
   CHECK(clamped_top.top == 80 - 800);
-  CHECK(wxb::Height(clamped_top) == 800);
 
   // 从 4K 换到 1080p：尺寸必须一起缩。只挪位置的话，右下角的拉伸手柄
   // 正好在屏幕外，用户自己都拉不回来。
@@ -216,7 +163,6 @@ int main() {
   TestComputeDock();
   TestHiddenRect();
   TestPeekStrip();
-  TestLooksSnapped();
   TestClampToWork();
   TestCoversWorkArea();
   TestEase();

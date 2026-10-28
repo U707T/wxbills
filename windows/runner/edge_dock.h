@@ -24,15 +24,16 @@ class EdgeDock {
   /// 4px 的条如果在 150% 缩放下还是 4 物理像素，实际只有 2.7 逻辑像素，
   /// 又细又难点，和 100% 缩放下的手感完全不是一回事。
   struct Params {
-    int tolerance = 8;          // 离工作区边多少逻辑像素算贴上
-    int peek = 4;               // 隐藏后露出的条宽
+    int tolerance = 8;          // 离工作区顶边多少逻辑像素算贴上
+    int peek = 4;               // 藏起来后露出的条高
     int strip_margin = 3;       // 露出条两侧的热区容差
     int leave_delay_ms = 350;   // 鼠标离开多久后开始收（防止"路过"就收）
     int animation_ms = 160;     // 滑动时长
-    int idle_tick_ms = 100;     // 可见（贴边但没收起）时的轮询间隔
-    int hidden_tick_ms = 40;    // 隐藏时的轮询间隔：要"碰到就弹回来"，得密一点
+    int idle_tick_ms = 100;     // 贴顶但没收起时的轮询间隔
+    int hidden_tick_ms = 40;    // 藏起来时的轮询间隔：要"碰到就弹回来"，得密一点
+    int undocked_tick_ms = 250; // 没贴边时的轮询间隔：只为不错过"挪到顶边"
     int anim_tick_ms = 16;      // 动画帧间隔（~60fps）
-    int min_visible = 80;       // 夹回屏幕时至少留多少像素可见（物理像素）
+    int min_visible = 80;       // 夹回屏幕时至少留多少像素可见（逻辑像素）
   };
 
   EdgeDock() = default;
@@ -54,6 +55,13 @@ class EdgeDock {
 
   /// 启动时把上次保存的矩形灌进来（夹回工作区、按几何重新判定贴边）。
   void RestoreFromState(const RECT& rect, bool maximized);
+
+  /// 用户点「贴到顶部」：把窗口的**可见顶边**移到工作区顶部并进入贴顶状态。
+  ///
+  /// 为什么必须有一个显式动作：Windows 的 Aero Snap 会在鼠标碰到屏幕顶端时
+  /// 直接最大化窗口，用户根本没法用"拖到顶边"这个手势（左右边更糟——会被
+  /// 变成半屏贴靠）。所以贴顶是**点一下**完成的，不依赖拖拽。
+  void SnapToTop();
 
   /// 立刻复位到"露出"状态：Alt+Tab、点任务栏图标、关窗口之前都要调。
   void ShowNow();

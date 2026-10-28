@@ -521,10 +521,12 @@ class _SettingsPageState extends State<SettingsPage> {
             onChanged: (v) => unawaited(c.setEdgeHide(v)),
             dense: true,
             contentPadding: EdgeInsets.zero,
-            title: const Text('贴边隐藏', style: TextStyle(fontSize: 13.5)),
+            title: const Text('贴边隐藏（只贴屏幕顶部）', style: TextStyle(fontSize: 13.5)),
             subtitle: const Text(
-              '把窗口拖到屏幕左/右/上边缘，鼠标离开后自动收起、只留一条边；'
-              '鼠标碰到那条边就弹回来。最大化、半屏贴靠、正在拖窗口时都不会收。',
+              '开启后，列表右上角会出现 ⬆：点它把窗口贴到屏幕顶部，'
+              '鼠标离开就自动收起、只留一条边；鼠标碰到屏幕顶边就弹回来。\n'
+              '（不用拖拽：Windows 把"拖到顶边"直接变成最大化了。）'
+              '最大化、拖窗口、弹出文件选择框时都不会收。',
               style: TextStyle(
                   fontSize: 11.5, color: Palette.textDim, height: 1.45),
             ),

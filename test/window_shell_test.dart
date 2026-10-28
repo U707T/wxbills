@@ -74,7 +74,13 @@ void main() {
       await WindowShell.save(const WindowPrefs(edgeHide: false)),
       isFalse,
     );
+    expect(await WindowShell.snapToTop(), isFalse);
     expect((await WindowShell.load()).edgeHide, isTrue);
     expect(calls, isEmpty, reason: '不该在 Android 上建一个没人接的通道');
+  });
+
+  test('snapToTop 让 runner 把窗口挪到屏幕顶部', () async {
+    expect(await WindowShell.snapToTop(), isTrue);
+    expect(calls.single.method, 'snapToTop');
   });
 }

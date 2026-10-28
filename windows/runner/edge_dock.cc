@@ -85,6 +85,36 @@ void EdgeDock::RestoreFromState(const RECT& rect, bool maximized) {
   phase_ = Phase::kNormal;
 }
 
+void EdgeDock::SnapToTop() {
+  if (hwnd_ == nullptr) return;
+  // 最大化 / 最小化状态下没有"顶部"可言，先还原成普通窗口
+  if (IsIconic(hwnd_) || IsZoomed(hwnd_)) {
+    ShowWindow(hwnd_, SW_RESTORE);
+  }
+  UpdateWorkArea();
+  UpdateDpiScale();
+  UpdateFramePadding(true);
+
+  RECT rect{};
+  if (!GetWindowRect(hwnd_, &rect)) return;
+  wxb::Rect r =
+      wxb::ClampToWork(ToWxb(rect), work_, Scaled(params_.min_visible));
+  const int height = wxb::Height(r);
+  // 只把"看得见"的顶边吸到工作区顶：宽高都不动，也就不会触发 Flutter 重排
+  r.top = work_.top - pad_.top;
+  r.bottom = r.top + height;
+  rest_ = ToRect(r);
+  dock_ = wxb::DockEdge::kTop;
+  phase_ = Phase::kNormal;
+
+  if (suppressed_) {
+    suppressed_ = false;
+    ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
+  }
+  MoveTo(rest_);
+  RestartIdleTimer();  // 换成"贴顶"档频率
+}
+
 bool EdgeDock::ForegroundCoversWorkArea() const {
   const HWND foreground = GetForegroundWindow();
   if (foreground == nullptr || foreground == hwnd_) return false;
@@ -206,14 +236,13 @@ void EdgeDock::RefreshNormalGeometry() {
   // 否则每次 tick 都夹一遍会和用户"故意把窗口拖出一半"较劲。
   rest_ = rect;
   // 用"看得见"的矩形判定贴边：外框每边多出约 7px，按外框判会把
-  // 离边缘 15px 的窗口也算成贴边。
-  dock_ = wxb::ComputeDock(VisibleRest(), work_, Scaled(params_.tolerance));
-  // 不贴边就不必轮询：贴边状态由 WM_EXITSIZEMOVE / WM_SIZE 事件驱动。
-  // 一个浮在屏幕中间的窗口让进程每秒醒 10 次纯属浪费电。
-  if (dock_ == wxb::DockEdge::kNone) {
-    StopTimer(&idle_timer_);
-  } else {
-    StartIdleTimer();
+  // 离顶边 15px 的窗口也算成贴边。
+  const wxb::DockEdge next =
+      wxb::ComputeDock(VisibleRest(), work_, Scaled(params_.tolerance));
+  if (next != dock_) {
+    dock_ = next;
+    // 频率跟着"贴没贴顶"换档（40 / 100 / 250ms），不能等下次重启
+    RestartIdleTimer();
   }
 }
 
@@ -265,8 +294,6 @@ bool EdgeDock::CanAutoHide() {
   if (IsIconic(hwnd_) || IsZoomed(hwnd_)) return false;
   if (!IsWindowVisible(hwnd_)) return false;
   if (ForegroundIsOwnDialog()) return false;
-  // 半屏贴靠（Win+←）本来就是为了并排看，别收
-  if (wxb::LooksSnapped(VisibleRest(), work_)) return false;
   return true;
 }
 
@@ -306,12 +333,20 @@ void EdgeDock::StopAllTimers() {
 
 void EdgeDock::StartIdleTimer() {
   if (!enabled_ || hwnd_ == nullptr || idle_timer_ != 0) return;
-  // 没贴边、也没藏着：没有任何需要轮询的理由
-  if (dock_ == wxb::DockEdge::kNone && phase_ != Phase::kHidden) return;
-  const int interval = phase_ == Phase::kHidden ? params_.hidden_tick_ms
-                                                : params_.idle_tick_ms;
-  idle_timer_ = SetTimer(hwnd_, kTimerIdle, static_cast<UINT>(interval),
-                         nullptr);
+  // 三档频率，都是"够用就好"：
+  //   藏着 40ms    —— 鼠标碰到就要弹回来，慢了像坏了
+  //   贴顶 100ms   —— 只需要察觉"鼠标离开了"
+  //   没贴边 250ms —— 只需要不错过"用户把窗口挪到顶边"
+  // 早先的版本在"没贴边"时干脆不起定时器，靠 WM_MOVE/WM_EXITSIZEMOVE 兜底；
+  // 结果只要有一条消息没按预期到达，功能就整体静默失效（用户看到的就是
+  // "贴边完全没生效"）。宁可每秒醒 4 次，也不要靠事件必须准时。
+  int interval = params_.undocked_tick_ms;
+  if (phase_ == Phase::kHidden) {
+    interval = params_.hidden_tick_ms;
+  } else if (dock_ != wxb::DockEdge::kNone) {
+    interval = params_.idle_tick_ms;
+  }
+  idle_timer_ = SetTimer(hwnd_, kTimerIdle, static_cast<UINT>(interval), nullptr);
 }
 
 void EdgeDock::RestartIdleTimer() {

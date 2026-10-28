@@ -91,6 +91,21 @@ class WindowShell {
     }
   }
 
+  /// 把窗口贴到屏幕顶部（只有 Windows 有）。
+  ///
+  /// **这是唯一的贴边入口**：Windows 的 Aero Snap 会在鼠标碰到屏幕顶端时
+  /// 直接最大化窗口，所以"拖到顶边"根本走不通，只能由界面点一下。
+  static Future<bool> snapToTop() async {
+    if (!isSupported) return false;
+    try {
+      await channel.invokeMethod<void>('snapToTop');
+      return true;
+    } catch (e) {
+      debugPrint('贴到顶部失败：$e');
+      return false;
+    }
+  }
+
   @visibleForTesting
   static void resetForTest() {
     _prefs = const WindowPrefs();

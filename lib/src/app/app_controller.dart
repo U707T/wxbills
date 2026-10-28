@@ -749,7 +749,7 @@ class AppController extends ChangeNotifier {
     // 贴边隐藏默认就是开的：如果只在"用户手动打开开关"时提示，默认用户
     // 永远看不到说明，第一次撞见窗口自己收起来只会当成 bug。
     if (_windowPrefs.edgeHide && !hasSeenTip(TipKeys.edgeHide)) {
-      showToast('贴边隐藏已开启：窗口拖到屏幕边缘会自动收起，鼠标碰到边上的细条弹回来');
+      showToast('贴边隐藏已开启：点右上角 ⬆ 贴到屏幕顶部，鼠标离开就会收起');
       await markTipSeen(TipKeys.edgeHide);
     }
   }
@@ -777,9 +777,17 @@ class AppController extends ChangeNotifier {
       return;
     }
     if (!value || hasSeenTip(TipKeys.edgeHide)) return;
-    // 开了却不知道要"拖到边缘"，会以为功能没生效 —— 只说一次
-    showToast('把窗口拖到屏幕左/右/上边缘，鼠标离开就会收起来；碰到边上的细条弹回来');
+    // 开了却不知道怎么触发，会以为功能没生效 —— 只说一次
+    showToast('点右上角的 ⬆ 把窗口贴到屏幕顶部；之后鼠标离开就会收起，碰到顶边弹回来');
     await markTipSeen(TipKeys.edgeHide);
+  }
+
+  /// 把窗口贴到屏幕顶部（Windows）。成功后鼠标离开就自动收起。
+  Future<void> snapWindowToTop() async {
+    final ok = await WindowShell.snapToTop();
+    showToast(ok
+        ? '已贴到屏幕顶部：鼠标离开会自动收起，碰到屏幕顶边弹回来'
+        : '贴到顶部没成功（这个平台不支持）');
   }
 
   void _setBusy(bool busy, String label, double fraction) {

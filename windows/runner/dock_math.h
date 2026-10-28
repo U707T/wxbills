@@ -3,10 +3,14 @@
 
 // 贴边隐藏的**纯几何**部分：只依赖整数运算，不 include windows.h、不碰窗口句柄。
 //
-// 为什么要单独拆出来：这段逻辑决定了「窗口算不算贴边」「隐藏后停在哪」「鼠标
-// 碰到哪一块算唤出」，全都是边界条件成堆的地方（任务栏、负坐标副屏、窗口比
-// 屏幕还宽、贴着角落）。拆成纯函数之后可以用 `dock_math_test.cpp` 直接跑，
-// 不必开 Flutter、不必有窗口。
+// 为什么要单独拆出来：这段逻辑决定了「窗口算不算贴边」「藏到哪」「鼠标碰到哪一块
+// 算唤出」，全是边界条件成堆的地方（任务栏、多显示器、DPI）。拆成纯函数之后可以
+// 用 `dock_math_test.cpp` 直接跑，不必开 Flutter、不必有窗口。
+//
+// **只做顶部贴边**。左边/右边在 Windows 上没法用拖动触发：鼠标碰到屏幕边缘时
+// Aero Snap 会把窗口变成半屏，而"半屏贴靠"恰恰是最不该自动收起的情况
+// （用户就是为了并排对照才那么放的）。顶部同理——拖到顶边会直接最大化。
+// 所以触发方式是显式的「贴到顶部」动作（见 EdgeDock::SnapToTop），而不是拖拽。
 namespace wxb {
 
 /// 与 RECT 同构，但刻意不用 RECT：这样测试文件能在任何平台编译。
@@ -26,27 +30,8 @@ inline bool Contains(const Rect& r, int x, int y) {
   return x >= r.left && x < r.right && y >= r.top && y < r.bottom;
 }
 
-enum class DockEdge { kNone, kLeft, kRight, kTop };
-
-/// 窗口贴在哪条边上。
-///
-/// [tolerance] 是"离边多近算贴上"。**同时**贴上两条边的情况必须显式排除：
-///  * 整宽（最大化、或用户拉得跟屏幕一样宽）→ 不贴，否则一移动到边上就收起来，
-///    再也拖不回来；
-///  * 比工作区还宽（跨屏/横跨两台显示器）→ 不贴，任何一侧收起都会遮住另一屏。
-inline DockEdge ComputeDock(const Rect& window, const Rect& work, int tolerance) {
-  if (Width(window) >= Width(work) - tolerance) return DockEdge::kNone;
-  if (Height(window) >= Height(work) - tolerance) return DockEdge::kNone;
-
-  const bool left = window.left - work.left <= tolerance;
-  const bool right = work.right - window.right <= tolerance;
-  // 左右都贴（窗口比工作区窄但横跨？）——不处理，宁可不动
-  if (left && right) return DockEdge::kNone;
-  if (left) return DockEdge::kLeft;
-  if (right) return DockEdge::kRight;
-  if (window.top - work.top <= tolerance) return DockEdge::kTop;
-  return DockEdge::kNone;
-}
+/// 只有"没贴"和"贴顶"两种。
+enum class DockEdge { kNone, kTop };
 
 /// DWM 的"看不见的边框"：`GetWindowRect` 比肉眼看到的窗口每边多出约 7px
 /// （Win10/11 的可调整边框 + 阴影），且随 DPI 缩放。
@@ -66,74 +51,42 @@ inline Rect VisibleRect(const Rect& window, const FramePadding& pad) {
               window.right - pad.right, window.bottom - pad.bottom};
 }
 
-/// 隐藏后的窗口矩形：只沿贴边方向平移出去，露出 [peek] 像素。
+/// 窗口贴在工作区顶边吗？
+///
+/// [tolerance] 是"离顶边多近算贴上"，调用方会按 DPI 缩放后传进来。
+/// 比工作区还高的窗口一律不贴：收起来之后连标题栏都找不回来。
+inline DockEdge ComputeDock(const Rect& window, const Rect& work, int tolerance) {
+  if (Height(window) >= Height(work) - tolerance) return DockEdge::kNone;
+  if (window.top - work.top <= tolerance) return DockEdge::kTop;
+  return DockEdge::kNone;
+}
+
+/// 藏起来之后的窗口矩形：整块往上推，只留 [peek] 像素露在工作区顶部。
 ///
 /// **只改位置不改尺寸**——runner 里靠 `SetWindowPos(SWP_NOSIZE)` 落实；一旦连带
 /// 改尺寸，Flutter 每帧都要重新布局，滑动动画必然掉帧。
 ///
-/// 露出量按**可见矩形**算，所以要补偿 [pad]：右贴时 `rect.left` 要比
-/// `work.right - peek` 再往左挪一个左内边距。
+/// 露出量按**可见矩形**算，所以要补偿 [pad]：藏起来时 `rect.bottom` 要比
+/// `work.top + peek` 再往下多一个底内边距，否则露出来的是透明边框。
 inline Rect HiddenRect(const Rect& rest, const Rect& work, DockEdge dock,
-                       int peek, const FramePadding& pad = FramePadding{0, 0,
-                                                                       0, 0}) {
+                       int peek,
+                       const FramePadding& pad = FramePadding{0, 0, 0, 0}) {
   Rect r = rest;
-  switch (dock) {
-    case DockEdge::kLeft:
-      r.right = work.left + peek + pad.right;
-      r.left = r.right - Width(rest);
-      break;
-    case DockEdge::kRight:
-      r.left = work.right - peek - pad.left;
-      r.right = r.left + Width(rest);
-      break;
-    case DockEdge::kTop:
-      r.bottom = work.top + peek + pad.bottom;
-      r.top = r.bottom - Height(rest);
-      break;
-    case DockEdge::kNone:
-      break;
+  if (dock == DockEdge::kTop) {
+    r.bottom = work.top + peek + pad.bottom;
+    r.top = r.bottom - Height(rest);
   }
   return r;
 }
 
 /// 光标是否落在"露出条"上（唤醒热区）。
 ///
-/// [margin] 是条两侧的容差：条只有 4px 宽，要求像素级命中会让人以为功能坏了。
+/// [margin] 是条两侧的容差：条只有 4px 高，要求像素级命中会让人以为功能坏了。
 inline bool InPeekStrip(const Rect& rest, const Rect& work, DockEdge dock,
                         int peek, int margin, int x, int y) {
-  switch (dock) {
-    case DockEdge::kLeft:
-      return x >= work.left - margin && x <= work.left + peek + margin &&
-             y >= rest.top - margin && y <= rest.bottom + margin;
-    case DockEdge::kRight:
-      return x >= work.right - peek - margin && x <= work.right + margin &&
-             y >= rest.top - margin && y <= rest.bottom + margin;
-    case DockEdge::kTop:
-      return y >= work.top - margin && y <= work.top + peek + margin &&
-             x >= rest.left - margin && x <= rest.right + margin;
-    case DockEdge::kNone:
-      return false;
-  }
-  return false;
-}
-
-/// 看起来是系统"Aero Snap 半屏 / 全屏贴靠"（Win+←/→/↑）吗？
-///
-/// 这种窗口本来就是为了并排对照才贴边的，鼠标一离开就收起来会让人抓狂。
-/// 两条判据，都只认"系统贴靠的那种尺寸"，不按"窗口大不大"一刀切：
-///  * 宽度**正好**是工作区一半（±2px）—— 这是 Win+← / Win+→ 的结果；
-///  * 宽度 ≥ 工作区 95% —— 这是 Win+↑ 的"铺满"（它不走最大化状态，
-///    `IsZoomed` 判断不到）。
-///
-/// 早先的版本用"超过 55% 就不收"，结果是 1080p 上 1280 宽的默认窗口
-/// （正好 66%）永远不收——功能看起来完全没生效。宁可少收，也不能整片不生效。
-inline bool LooksSnapped(const Rect& window, const Rect& work) {
-  const int work_width = Width(work);
-  if (work_width <= 0) return false;
-  const long long w = Width(window);
-  const long long twice_diff = w * 2 - static_cast<long long>(work_width);
-  if (twice_diff <= 4 && twice_diff >= -4) return true;
-  return w * 100 >= static_cast<long long>(work_width) * 95;
+  if (dock != DockEdge::kTop) return false;
+  return y >= work.top - margin && y <= work.top + peek + margin &&
+         x >= rest.left - margin && x <= rest.right + margin;
 }
 
 /// 把矩形夹回工作区：先缩到能放下的尺寸，再保证横向/纵向各有至少

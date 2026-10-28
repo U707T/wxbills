@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../model/bill.dart';
+import '../../platform/window_shell.dart';
 import '../app_controller.dart';
 import '../theme.dart';
 import '../widgets/bill_tile.dart';
@@ -257,6 +258,14 @@ class _BillsPageState extends State<BillsPage> {
                   : '立即同步（WebDAV）',
               onPressed: () => c.runSync(),
             ),
+            // 贴边隐藏开着时才出现：Windows 的 Aero Snap 会把"拖到顶边"变成
+            // 最大化，所以贴顶只能点一下，不给入口就等于没有这个功能。
+            if (WindowShell.isSupported && c.windowPrefs.edgeHide)
+              HeaderIconButton(
+                icon: Icons.vertical_align_top,
+                tooltip: '贴到屏幕顶部（鼠标离开自动收起）',
+                onPressed: () => unawaited(c.snapWindowToTop()),
+              ),
             HeaderIconButton(
               icon: Icons.settings_outlined,
               tooltip: '设置',

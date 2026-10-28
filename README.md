@@ -24,8 +24,9 @@
   让 QQ / 相册把它当成新增图片。走三步兜底策略，失败不丢数据。
 - **窗口记得住**（Windows 专属）：退出时的尺寸、位置、最大化状态下次打开直接到位，
   不会先出现一个 1280×720 再跳过去。每台机器各自记，不跟着 WebDAV 走。
-- **贴边隐藏**（Windows 专属，QQ 式）：窗口拖到屏幕左/右/上边缘，鼠标离开就收起来，
-  只留一条 4px 的边；鼠标碰到那条边就弹回来。最大化、半屏贴靠、拖拽中都不会收。
+- **贴边隐藏**（Windows 专属，QQ 式，**只贴屏幕顶部**）：点列表右上角的 ⬆ 把窗口贴到
+  屏幕顶，鼠标离开就收起、只留 4px；鼠标碰到屏幕顶边就弹回来。
+  不用拖拽——Windows 会把"拖到顶边"直接变成最大化，所以贴顶是点一下完成的。
 - **双端一致**：Windows 上用系统目录对话框选图，Android 上用 SAF 授权目录；
   业务逻辑、界面、同步完全共用一套代码。
 
@@ -48,7 +49,7 @@
 | 行内快捷操作 | 刷新图片日期 | **复制图片**（原图进剪贴板；原图不在本机时复制同步来的缩略图） |
 | 刷新图片日期 | ✅ | ❌（桌面没有「相册入库时间」概念） |
 | 记住窗口大小 / 位置 | ❌ | ✅（`%LOCALAPPDATA%\wxbills\window.ini`） |
-| 贴边隐藏 | ❌ | ✅（设置里可关） |
+| 贴边隐藏 | ❌ | ✅（只贴顶部，点 ⬆ 触发；设置里可关） |
 | WebDAV 同步 | ✅ | ✅ |
 
 ## 同步设计
@@ -86,7 +87,7 @@
 export PATH=/opt/flutter/bin:$PATH
 flutter pub get
 flutter analyze
-flutter test                      # 107 项：OCR 回归 / 同步端到端 / 原图同步 / 复制图片 / 存储 / 扫描 / UI / 窗口开关
+flutter test                      # 108 项：OCR 回归 / 同步端到端 / 原图同步 / 复制图片 / 存储 / 扫描 / UI / 窗口开关
 # 贴边隐藏的几何单测（纯 C++，不依赖 Flutter 和 Windows）
 g++ -std=c++17 -Wall -Wextra -Werror windows/runner/dock_math_test.cpp -o /tmp/dock_math_test && /tmp/dock_math_test
 flutter build apk --debug --target-platform=android-arm64
@@ -116,7 +117,7 @@ type $env:TEMP\wxbills-startup.log
 | `test/boot_sync_test.dart` | 启动时真的会跑一次自动同步（scan 与 sync 不互相抢 _busy） |
 | `test/app_ui_test.dart` | 空态、排序、搜索、编辑、删除、设置页、提示条真的能显示、说明只弹一次、窗口开关（Windows 显示 / 非 Windows 不显示） |
 | `test/window_shell_test.dart` | 窗口开关通道：读回、写入参数、通道不通时降级、非 Windows 完全不碰通道 |
-| `windows/runner/dock_math_test.cpp` | 贴边几何（C++）：贴哪条边、藏到哪、唤出热区、半屏贴靠不自动收、拔显示器后夹回、缓动不过冲 |
+| `windows/runner/dock_math_test.cpp` | 贴边几何（C++）：顶边判定、藏到哪、唤出热区、全屏覆盖判定、拔显示器后夹回（含缩尺寸）、缓动不过冲 |
 | `test/ux_prefs_test.dart` | 启动不自动扫相册（手动才刷新）/ 开关生效 / 一次性说明持久化 / 提示去重 / 列表缓存失效 |
 
 同步测试用 `test/support/test_dav_server.dart` 起一个内存 WebDAV 服务器，
