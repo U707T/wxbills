@@ -5,6 +5,9 @@
 
 #include "resource.h"
 
+const wchar_t Win32Window::kRunnerWindowClassName[] =
+    L"FLUTTER_RUNNER_WIN32_WINDOW";
+
 namespace {
 
 /// Window attribute that enables dark mode window decorations.
@@ -16,7 +19,7 @@ namespace {
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
 #endif
 
-constexpr const wchar_t kWindowClassName[] = L"FLUTTER_RUNNER_WIN32_WINDOW";
+constexpr const wchar_t* kWindowClassName = Win32Window::kRunnerWindowClassName;
 
 /// Registry key for app theme preference.
 ///
@@ -28,6 +31,11 @@ constexpr const wchar_t kGetPreferredBrightnessRegValue[] = L"AppsUseLightTheme"
 
 // The number of Win32Window objects that currently exist.
 static int g_active_window_count = 0;
+
+// 最小窗口尺寸（逻辑像素）。记忆几何 / 贴边隐藏都可能留下一个窄到没法用的
+// 窗口，这里兜一道底：标题栏和按钮永远挪得动、点得到。
+constexpr int kMinWindowWidth = 720;
+constexpr int kMinWindowHeight = 480;
 
 using EnableNonClientDpiScaling = BOOL __stdcall(HWND hwnd);
 
@@ -122,7 +130,9 @@ Win32Window::~Win32Window() {
 
 bool Win32Window::Create(const std::wstring& title,
                          const Point& origin,
-                         const Size& size) {
+                         const Size& size,
+                         bool physical,
+                         bool maximized) {
   Destroy();
 
   const wchar_t* window_class =
@@ -132,10 +142,18 @@ bool Win32Window::Create(const std::wstring& title,
                               static_cast<LONG>(origin.y)};
   HMONITOR monitor = MonitorFromPoint(target_point, MONITOR_DEFAULTTONEAREST);
   UINT dpi = FlutterDesktopGetDpiForMonitor(monitor);
-  double scale_factor = dpi / 96.0;
+  // physical=true 表示 origin/size 已经是物理像素（从 window.ini 恢复的几何），
+  // 再乘一次 DPI 会让窗口在 150% 缩放下正好放大 1.5 倍。
+  double scale_factor = physical ? 1.0 : dpi / 96.0;
+
+  DWORD style = WS_OVERLAPPEDWINDOW;
+  if (maximized) {
+    // 仍然不带 WS_VISIBLE：窗口不可见，但尺寸/位置已经是最大化后的那一套
+    style |= WS_MAXIMIZE;
+  }
 
   HWND window = CreateWindow(
-      window_class, title.c_str(), WS_OVERLAPPEDWINDOW,
+      window_class, title.c_str(), style,
       Scale(origin.x, scale_factor), Scale(origin.y, scale_factor),
       Scale(size.width, scale_factor), Scale(size.height, scale_factor),
       nullptr, nullptr, GetModuleHandle(nullptr), this);
@@ -179,6 +197,19 @@ Win32Window::MessageHandler(HWND hwnd,
                             WPARAM const wparam,
                             LPARAM const lparam) noexcept {
   switch (message) {
+    case WM_GETMINMAXINFO: {
+      auto* info = reinterpret_cast<MINMAXINFO*>(lparam);
+      const HMONITOR monitor =
+          MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+      const double scale = FlutterDesktopGetDpiForMonitor(monitor) / 96.0;
+      info->ptMinTrackSize.x =
+          static_cast<LONG>(static_cast<double>(kMinWindowWidth) * scale);
+      info->ptMinTrackSize.y =
+          static_cast<LONG>(static_cast<double>(kMinWindowHeight) * scale);
+      // 交给 DefWindowProc 补齐 ptMaxTrackSize 等其余字段，只覆盖最小尺寸
+      return DefWindowProc(hwnd, message, wparam, lparam);
+    }
+
     case WM_DESTROY:
       window_handle_ = nullptr;
       Destroy();

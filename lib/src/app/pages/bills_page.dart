@@ -75,8 +75,18 @@ class _BillsPageState extends State<BillsPage> {
 
   void _onChanged() {
     if (!mounted) return;
+    // 顺手把已经不在筛选结果里的 key 清掉：数量自然收敛到"一屏多一点"。
+    // （以前是在 build 里为**全部**记录 putIfAbsent 再全量做差集，见 _keyFor）
+    final visible = {for (final b in c.visibleBills) b.id};
+    _itemKeys.removeWhere((id, _) => !visible.contains(id));
     setState(() {});
   }
+
+  /// 只为"真正构建出来的行"建 GlobalKey。
+  ///
+  /// GlobalKey 只有一个用途：`_locate()` 里做一次精确对齐（`ensureVisible`）。
+  /// 屏外的行本来就没有 context，提前给 500 条记录各建一个 key 纯属首帧白花。
+  GlobalKey _keyFor(String id) => _itemKeys.putIfAbsent(id, GlobalKey.new);
 
   // ---------------------------------------------------------------- 定位
 
@@ -227,12 +237,6 @@ class _BillsPageState extends State<BillsPage> {
   @override
   Widget build(BuildContext context) {
     final bills = c.visibleBills;
-    // 用 Set 做差集，别在 removeWhere 里对每个 key 再遍历一遍列表（O(n²)）
-    final visibleIds = {for (final b in bills) b.id};
-    _itemKeys.removeWhere((id, _) => !visibleIds.contains(id));
-    for (final b in bills) {
-      _itemKeys.putIfAbsent(b.id, () => GlobalKey());
-    }
 
     return Column(
       children: [
@@ -304,7 +308,7 @@ class _BillsPageState extends State<BillsPage> {
                     itemBuilder: (context, i) {
                       final b = bills[i];
                       return KeyedSubtree(
-                        key: _itemKeys[b.id],
+                        key: _keyFor(b.id),
                         child: BillTile(
                           bill: b,
                           // 后台批量改写账本时不接受逐条编辑：

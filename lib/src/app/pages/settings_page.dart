@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import '../../data/store.dart';
 import '../../model/bill.dart';
+import '../../platform/window_shell.dart';
 import '../app_controller.dart';
 import '../theme.dart';
 import '../widgets/ui_kit.dart';
@@ -153,6 +154,10 @@ class _SettingsPageState extends State<SettingsPage> {
                   _syncCard(cfg),
                   const SizedBox(height: 12),
                   _foldersCard(),
+                  if (WindowShell.isSupported) ...[
+                    const SizedBox(height: 12),
+                    _windowCard(),
+                  ],
                   const SizedBox(height: 12),
                   _diagnoseCard(),
                   const SizedBox(height: 12),
@@ -479,6 +484,54 @@ class _SettingsPageState extends State<SettingsPage> {
       _diagnosing = false;
       _diagnosis = text;
     });
+  }
+
+  /// 窗口行为（只有 Windows 有）：记住几何 + 贴边隐藏。
+  ///
+  /// 两个开关的真实执行者都是 runner（见 `windows/runner/edge_dock.cc`），
+  /// 这里只是把它们读写到 `%LOCALAPPDATA%\wxbills\window.ini`。
+  Widget _windowCard() {
+    final prefs = c.windowPrefs;
+    return AppCard(
+      padding: const EdgeInsets.fromLTRB(14, 14, 14, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.window_outlined, size: 18, color: Palette.green),
+              SizedBox(width: 8),
+              Text('窗口（Windows）',
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+            ],
+          ),
+          SwitchListTile(
+            value: prefs.remember,
+            onChanged: (v) => unawaited(c.setRememberWindow(v)),
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            title: const Text('记住窗口大小与位置', style: TextStyle(fontSize: 13.5)),
+            subtitle: const Text(
+              '下次打开直接用上次的尺寸和位置，最大化状态也一起记住',
+              style: TextStyle(fontSize: 11.5, color: Palette.textDim),
+            ),
+          ),
+          SwitchListTile(
+            value: prefs.edgeHide,
+            onChanged: (v) => unawaited(c.setEdgeHide(v)),
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            title: const Text('贴边隐藏', style: TextStyle(fontSize: 13.5)),
+            subtitle: const Text(
+              '把窗口拖到屏幕左/右/上边缘，鼠标离开后自动收起、只留一条边；'
+              '鼠标碰到那条边就弹回来。最大化、半屏贴靠、正在拖窗口时都不会收。',
+              style: TextStyle(
+                  fontSize: 11.5, color: Palette.textDim, height: 1.45),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   /// 识别诊断：扫描后仍是「未识别」时，用它看清卡在读图、解码还是识别。

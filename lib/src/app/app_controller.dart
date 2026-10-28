@@ -11,6 +11,7 @@ import '../data/scanner.dart';
 import '../data/store.dart';
 import '../model/bill.dart';
 import '../platform/photo_source.dart';
+import '../platform/window_shell.dart';
 import '../webdav/sync.dart';
 
 /// 「一次性说明」的键。看过一次就记在 [UiPrefs.seenTips] 里，之后不再打扰。
@@ -24,6 +25,9 @@ class TipKeys {
 
   /// 识别诊断卡片的长说明。
   static const String diagnose = 'diagnose';
+
+  /// 贴边隐藏：第一次打开时说明「拖到边缘才会收」。
+  static const String edgeHide = 'edge_hide';
 }
 
 /// 排序方式。
@@ -159,6 +163,9 @@ class AppController extends ChangeNotifier {
     _ready = true;
     _notify();
     if (store.loadWarning.isNotEmpty) showToast(store.loadWarning);
+
+    // 窗口开关只有两个布尔值，读它不该挡首屏；通道不通也只是回落到默认值
+    unawaited(loadWindowPrefs());
 
     // 「有没有相册目录」只决定要不要扫描，不该连同步一起跳过：
     // 新设备先填同步地址、还没导入相册时，正是最需要拉一次远端数据的时候。
@@ -726,6 +733,53 @@ class AppController extends ChangeNotifier {
     store.setPrefs(store.prefs.copyWith(autoScanOnBoot: value));
     _notify();
     await _persist();
+  }
+
+  // ---------------------------------------------------------------- 窗口（Windows）
+
+  /// 窗口的两个开关。存在 `%LOCALAPPDATA%\wxbills\window.ini`（runner 那边写），
+  /// 不进 data.json：那是会被 WebDAV 同步到别的设备的账本。
+  WindowPrefs _windowPrefs = const WindowPrefs();
+  WindowPrefs get windowPrefs => _windowPrefs;
+
+  Future<void> loadWindowPrefs() async {
+    if (!WindowShell.isSupported) return;
+    _windowPrefs = await WindowShell.load();
+    _notify();
+    // 贴边隐藏默认就是开的：如果只在"用户手动打开开关"时提示，默认用户
+    // 永远看不到说明，第一次撞见窗口自己收起来只会当成 bug。
+    if (_windowPrefs.edgeHide && !hasSeenTip(TipKeys.edgeHide)) {
+      showToast('贴边隐藏已开启：窗口拖到屏幕边缘会自动收起，鼠标碰到边上的细条弹回来');
+      await markTipSeen(TipKeys.edgeHide);
+    }
+  }
+
+  Future<void> setRememberWindow(bool value) async {
+    final previous = _windowPrefs;
+    _windowPrefs = _windowPrefs.copyWith(remember: value);
+    _notify();
+    // 失败就回滚：否则界面显示"已关闭"，实际上 runner 还是老样子，重启才发现
+    if (!await WindowShell.save(_windowPrefs)) {
+      _windowPrefs = previous;
+      _notify();
+      showToast('窗口设置没写进去，重启后会恢复默认');
+    }
+  }
+
+  Future<void> setEdgeHide(bool value) async {
+    final previous = _windowPrefs;
+    _windowPrefs = _windowPrefs.copyWith(edgeHide: value);
+    _notify();
+    if (!await WindowShell.save(_windowPrefs)) {
+      _windowPrefs = previous;
+      _notify();
+      showToast('贴边隐藏没生效：窗口通道不通');
+      return;
+    }
+    if (!value || hasSeenTip(TipKeys.edgeHide)) return;
+    // 开了却不知道要"拖到边缘"，会以为功能没生效 —— 只说一次
+    showToast('把窗口拖到屏幕左/右/上边缘，鼠标离开就会收起来；碰到边上的细条弹回来');
+    await markTipSeen(TipKeys.edgeHide);
   }
 
   void _setBusy(bool busy, String label, double fraction) {

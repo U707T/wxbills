@@ -28,6 +28,13 @@ jobs:
         run: flutter pub get
       - name: Analyze
         run: dart analyze
+      # 贴边隐藏的纯几何部分（不依赖 Flutter / Windows）：贴哪条边、藏到哪、
+      # 鼠标碰到哪算唤出、拔掉副屏后夹回哪里 —— 这些边界在真机上试一次要半小时
+      - name: Test dock geometry (C++)
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            windows/runner/dock_math_test.cpp -o /tmp/dock_math_test
+          /tmp/dock_math_test
       # 含：18 张真实收款单的 OCR 回归、WebDAV 端到端同步（自建内存 DAV 服务器）、
       #     合并/墓碑/冲突重试、存储原子写、扫描增量与「手工金额不被覆盖」、UI 冒烟
       - name: Test

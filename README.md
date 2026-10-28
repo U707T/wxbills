@@ -22,6 +22,10 @@
   其余冲突按「最后修改时间」合并。
 - **刷新图片日期**（Android 专属）：把相册图片的入库时间改成现在，
   让 QQ / 相册把它当成新增图片。走三步兜底策略，失败不丢数据。
+- **窗口记得住**（Windows 专属）：退出时的尺寸、位置、最大化状态下次打开直接到位，
+  不会先出现一个 1280×720 再跳过去。每台机器各自记，不跟着 WebDAV 走。
+- **贴边隐藏**（Windows 专属，QQ 式）：窗口拖到屏幕左/右/上边缘，鼠标离开就收起来，
+  只留一条 4px 的边；鼠标碰到那条边就弹回来。最大化、半屏贴靠、拖拽中都不会收。
 - **双端一致**：Windows 上用系统目录对话框选图，Android 上用 SAF 授权目录；
   业务逻辑、界面、同步完全共用一套代码。
 
@@ -43,6 +47,8 @@
 | 缩略图 | 系统缩略图（最快） | 解码后缩放 |
 | 行内快捷操作 | 刷新图片日期 | **复制图片**（原图进剪贴板；原图不在本机时复制同步来的缩略图） |
 | 刷新图片日期 | ✅ | ❌（桌面没有「相册入库时间」概念） |
+| 记住窗口大小 / 位置 | ❌ | ✅（`%LOCALAPPDATA%\wxbills\window.ini`） |
+| 贴边隐藏 | ❌ | ✅（设置里可关） |
 | WebDAV 同步 | ✅ | ✅ |
 
 ## 同步设计
@@ -80,8 +86,17 @@
 export PATH=/opt/flutter/bin:$PATH
 flutter pub get
 flutter analyze
-flutter test                      # 101 项：OCR 回归 / 同步端到端 / 原图同步 / 复制图片 / 存储 / 扫描 / UI / 回归 / 启动与提示
+flutter test                      # 107 项：OCR 回归 / 同步端到端 / 原图同步 / 复制图片 / 存储 / 扫描 / UI / 窗口开关
+# 贴边隐藏的几何单测（纯 C++，不依赖 Flutter 和 Windows）
+g++ -std=c++17 -Wall -Wextra -Werror windows/runner/dock_math_test.cpp -o /tmp/dock_math_test && /tmp/dock_math_test
 flutter build apk --debug --target-platform=android-arm64
+```
+
+量 Windows 冷启动（原生 + Dart 写同一份日志，平时零开销）：
+
+```powershell
+.\wxbills.exe --startup-trace
+type $env:TEMP\wxbills-startup.log
 ```
 
 测试覆盖的重点：
@@ -99,7 +114,9 @@ flutter build apk --debug --target-platform=android-arm64
 | `test/scanner_test.dart` | 增量扫描、手工金额不被覆盖、删除留墓碑、跨设备记录不误删 |
 | `test/regression_test.dart` | 列目录失败不误删、删后重扫不复活、并发落盘、定位屏外记录、删除优先合并 |
 | `test/boot_sync_test.dart` | 启动时真的会跑一次自动同步（scan 与 sync 不互相抢 _busy） |
-| `test/app_ui_test.dart` | 空态、排序、搜索、编辑、删除、设置页、提示条真的能显示、说明只弹一次 |
+| `test/app_ui_test.dart` | 空态、排序、搜索、编辑、删除、设置页、提示条真的能显示、说明只弹一次、窗口开关（Windows 显示 / 非 Windows 不显示） |
+| `test/window_shell_test.dart` | 窗口开关通道：读回、写入参数、通道不通时降级、非 Windows 完全不碰通道 |
+| `windows/runner/dock_math_test.cpp` | 贴边几何（C++）：贴哪条边、藏到哪、唤出热区、半屏贴靠不自动收、拔显示器后夹回、缓动不过冲 |
 | `test/ux_prefs_test.dart` | 启动不自动扫相册（手动才刷新）/ 开关生效 / 一次性说明持久化 / 提示去重 / 列表缓存失效 |
 
 同步测试用 `test/support/test_dav_server.dart` 起一个内存 WebDAV 服务器，
@@ -122,11 +139,20 @@ lib/
       app_dirs.dart            私有目录布局
       json_io.dart             原子写 / 坏文件兜底
     platform/photo_source.dart 平台差异（Android SAF / Windows 文件系统）
+    platform/window_shell.dart 窗口开关通道（仅 Windows，其它平台空实现）
+    platform/startup_trace.dart 冷启动埋点（--startup-trace，平时零开销）
     webdav/
       webdav_client.dart       PROPFIND/GET/PUT/MKCOL/HEAD（Basic + 条件写）
       sync.dart                同步引擎（合并 + 墓碑 + 缩略图 + 重试）
     app/                       界面（列表 / 设置 / 主题 / 组件）
 android/app/src/main/kotlin/…  MainActivity：下采样解码 + 刷新图片日期
+windows/runner/
+  main.cpp                     读 window.ini → 按记忆的几何建窗 → 消息循环
+  flutter_window.cpp           托管 Flutter + 窗口通道 + 几何/贴边的消息钩子
+  window_state.cc              window.ini 读写（原子写，%LOCALAPPDATA%）
+  edge_dock.cc                 贴边隐藏状态机（轮询鼠标 / 滑动动画 / 隐藏时置顶）
+  dock_math.h                  纯几何（贴哪条边、藏到哪、唤出热区）+ dock_math_test.cpp
+  startup_trace.cc             冷启动埋点（QueryPerformanceCounter）
 ```
 
 ## 发布

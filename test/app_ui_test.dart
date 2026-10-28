@@ -1,7 +1,7 @@
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:wxbills/src/app/app.dart';
 import 'package:wxbills/src/app/app_controller.dart';
@@ -9,6 +9,7 @@ import 'package:wxbills/src/data/app_dirs.dart';
 import 'package:wxbills/src/data/store.dart';
 import 'package:wxbills/src/model/bill.dart';
 import 'package:wxbills/src/platform/photo_source.dart';
+import 'package:wxbills/src/platform/window_shell.dart';
 
 /// 无副作用、不碰平台通道的假图片源。
 class StubPhotoSource implements PhotoSource {
@@ -104,6 +105,9 @@ Bill sample(String id, int cents, {String note = '', bool manual = false}) => Bi
     );
 
 void main() {
+  // 窗口开关是全局静态状态：哪个用例忘了复位，后面的用例会跟着"变成 Windows"
+  tearDown(WindowShell.resetForTest);
+
   testWidgets('空列表显示引导文案与导入按钮', (tester) async {
     final (tmp, controller) = await buildController(tester);
     await tester.pumpWidget(WxBillsApp(controller: controller));
@@ -212,6 +216,77 @@ void main() {
     expect(find.text('服务器地址'), findsOneWidget);
     expect(find.text('测试连接'), findsOneWidget);
     expect(find.text('图片来源文件夹'), findsOneWidget);
+
+    await cleanup(tester, tmp);
+  });
+
+  testWidgets('设置页（Windows）显示窗口开关，关掉贴边隐藏会写回 runner',
+      (tester) async {
+    final (tmp, controller) = await buildController(tester);
+
+    // 假装是 Windows，并装上 runner 那边的通道替身
+    WindowShell.debugSupportedOverride = true;
+    final calls = <MethodCall>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      WindowShell.channel,
+      (call) async {
+        calls.add(call);
+        if (call.method == 'getPrefs') {
+          return <String, Object?>{'remember': true, 'edge': true};
+        }
+        return null;
+      },
+    );
+    await tester.runAsync(() => controller.loadWindowPrefs());
+
+    await tester.pumpWidget(WxBillsApp(controller: controller));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(Icons.settings_outlined));
+    await tester.pumpAndSettle();
+
+    // 设置页是个长 ListView：窗口卡片在文件夹卡片下面，得先滚出来
+    await tester.scrollUntilVisible(
+      find.text('贴边隐藏'),
+      240,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(find.text('窗口（Windows）'), findsOneWidget);
+    expect(find.text('贴边隐藏'), findsOneWidget);
+    expect(controller.windowPrefs.edgeHide, isTrue);
+
+    // 关掉（true → false）：既验界面能切，也验真的把新值发给了原生
+    final tile = find.widgetWithText(SwitchListTile, '贴边隐藏');
+    // scrollUntilVisible 只保证"露出来一点"，点之前先滚到完整可见
+    await tester.ensureVisible(tile);
+    await tester.pumpAndSettle();
+    await tester.tap(tile);
+    await tester.pumpAndSettle();
+
+    expect(controller.windowPrefs.edgeHide, isFalse);
+    final writes = calls.where((c) => c.method == 'setPrefs').toList();
+    expect(writes, isNotEmpty, reason: '开关必须落到 runner，否则重启就弹回来');
+    expect((writes.last.arguments as Map)['edge'], isFalse);
+
+    tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(WindowShell.channel, null);
+    await cleanup(tester, tmp);
+  });
+
+  testWidgets('非 Windows 不显示窗口开关（双端共用一套界面）', (tester) async {
+    final (tmp, controller) = await buildController(tester);
+    WindowShell.debugSupportedOverride = false;
+
+    await tester.pumpWidget(WxBillsApp(controller: controller));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(Icons.settings_outlined));
+    await tester.pumpAndSettle();
+
+    expect(find.text('WebDAV 同步'), findsOneWidget);
+    // 滚到底也找不到：这张卡只在 Windows 上存在
+    await tester.drag(find.byType(ListView), const Offset(0, -4000));
+    await tester.pumpAndSettle();
+    expect(find.text('窗口（Windows）'), findsNothing);
+    expect(find.text('贴边隐藏'), findsNothing);
 
     await cleanup(tester, tmp);
   });

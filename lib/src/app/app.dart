@@ -110,9 +110,7 @@ class _HomeShellState extends State<HomeShell> {
   @override
   Widget build(BuildContext context) {
     if (!_ready) {
-      return const Scaffold(
-        body: Center(child: CircularProgressIndicator()),
-      );
+      return const Scaffold(body: _LoadingShell());
     }
     return Scaffold(
       body: SafeArea(
@@ -122,6 +120,51 @@ class _HomeShellState extends State<HomeShell> {
           onOpenSettings: _openSettings,
         ),
       ),
+    );
+  }
+}
+
+/// 首屏骨架：数据还没读出来时，先把「窗口已经起来了」画出来。
+///
+/// 以前这里只有一个居中转圈：窗口出现 → 一圈灰白 → 列表"啪"地顶上来，
+/// 观感上比真实等待更慢，还会闪一下。现在把绿色头部和列表位置直接占住，
+/// 数据到达时只换中间那块，没有整页跳动。
+class _LoadingShell extends StatelessWidget {
+  const _LoadingShell();
+
+  @override
+  Widget build(BuildContext context) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final card = dark ? Palette.darkCard : Palette.card;
+    return Column(
+      children: [
+        // 高度与 BillsPage 的 GreenHeader（14+标题+4+副标题+14 ≈ 71）对齐
+        Container(
+          height: 71 + MediaQuery.of(context).padding.top,
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [Palette.green, Palette.greenDark],
+            ),
+          ),
+        ),
+        Expanded(
+          child: ListView.separated(
+            padding: const EdgeInsets.fromLTRB(14, 12, 14, 20),
+            itemCount: 6,
+            physics: const NeverScrollableScrollPhysics(),
+            separatorBuilder: (_, _) => const SizedBox(height: 8),
+            itemBuilder: (_, _) => Container(
+              height: 78,
+              decoration: BoxDecoration(
+                color: card,
+                borderRadius: BorderRadius.circular(Dimens.cardRadius),
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
