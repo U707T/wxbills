@@ -144,16 +144,29 @@ void TestCoversWorkArea() {
 }
 
 void TestEase() {
-  CHECK(wxb::EaseOutCubic(0.0) == 0.0);
-  CHECK(wxb::EaseOutCubic(1.0) == 1.0);
-  CHECK(wxb::EaseOutCubic(-1.0) == 0.0);  // 定时器抖动导致的负数不能过冲
-  CHECK(wxb::EaseOutCubic(2.0) == 1.0);
-  // 单调递增
-  double prev = -1.0;
+  // 端点必须精确：不然收起的最后一帧会"咔"一下补齐
+  CHECK(wxb::EaseInQuad(0.0) == 0.0);
+  CHECK(wxb::EaseInQuad(1.0) == 1.0);
+  CHECK(wxb::EaseOutQuad(0.0) == 0.0);
+  CHECK(wxb::EaseOutQuad(1.0) == 1.0);
+  // 帧步进的累积误差不能让它过冲
+  CHECK(wxb::EaseInQuad(-1.0) == 0.0);
+  CHECK(wxb::EaseInQuad(2.0) == 1.0);
+  CHECK(wxb::EaseOutQuad(-1.0) == 0.0);
+  CHECK(wxb::EaseOutQuad(2.0) == 1.0);
+  // 收起要"先慢"：前 1/4 进度走的距离必须远小于线性
+  CHECK(wxb::EaseInQuad(0.25) < 0.1);
+  // 弹回要"先快"：前 1/4 进度已经走过大半
+  CHECK(wxb::EaseOutQuad(0.25) > 0.4);
+  // 都单调递增
+  double prev_in = -1.0;
+  double prev_out = -1.0;
   for (int i = 0; i <= 10; ++i) {
-    const double v = wxb::EaseOutCubic(i / 10.0);
-    CHECK(v >= prev);
-    prev = v;
+    const double p = i / 10.0;
+    CHECK(wxb::EaseInQuad(p) >= prev_in);
+    CHECK(wxb::EaseOutQuad(p) >= prev_out);
+    prev_in = wxb::EaseInQuad(p);
+    prev_out = wxb::EaseOutQuad(p);
   }
 }
 

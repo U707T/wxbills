@@ -429,7 +429,7 @@ void EdgeDock::BeginHide() {
   UpdateFramePadding(true);
   anim_from_ = rest_;
   anim_to_ = HiddenRect();
-  anim_start_ = GetTickCount64();
+  anim_progress_ = 0.0;
   anim_hiding_ = true;
   StopTimer(&idle_timer_);
   StopTimer(&leave_timer_);
@@ -455,7 +455,7 @@ void EdgeDock::BeginShow() {
   RECT current{};
   anim_from_ = GetWindowRect(hwnd_, &current) ? current : anim_to_;
   anim_to_ = rest_;
-  anim_start_ = GetTickCount64();
+  anim_progress_ = 0.0;
   anim_hiding_ = false;
   StopTimer(&idle_timer_);
   anim_timer_ = SetTimer(hwnd_, kTimerAnim,
@@ -479,22 +479,25 @@ void EdgeDock::OnAnimTick() {
     StopTimer(&anim_timer_);
     return;
   }
-  const ULONGLONG elapsed = GetTickCount64() - anim_start_;
-  const double span = static_cast<double>(params_.animation_ms);
-  const double progress = span > 0.0 ? static_cast<double>(elapsed) / span : 1.0;
-  const double eased = wxb::EaseOutCubic(progress);
+  // 按帧推进（不是按墙钟）：晚到的 tick 只会让动画慢一点，不会"跳一大格"
+  const double step =
+      params_.animation_ms > 0
+          ? static_cast<double>(params_.anim_tick_ms) /
+                static_cast<double>(params_.animation_ms)
+          : 1.0;
+  anim_progress_ += step;
+  // 收起用 ease-in（先慢后快，像被吸走），弹回用 ease-out（先快后慢，稳稳停住）
+  const double eased = anim_hiding_ ? wxb::EaseInQuad(anim_progress_)
+                                    : wxb::EaseOutQuad(anim_progress_);
 
-  const LONG dx = anim_to_.left - anim_from_.left;
-  const LONG dy = anim_to_.top - anim_from_.top;
+  const double dy = static_cast<double>(anim_to_.top - anim_from_.top);
   RECT r = anim_from_;
-  r.left = anim_from_.left + static_cast<LONG>(static_cast<double>(dx) * eased);
-  r.top = anim_from_.top + static_cast<LONG>(static_cast<double>(dy) * eased);
-  // 尺寸恒定，right/bottom 跟着左上角走
-  r.right = r.left + (anim_from_.right - anim_from_.left);
+  r.top = anim_from_.top + static_cast<LONG>(dy * eased);
+  // 尺寸恒定，底边跟着顶边走
   r.bottom = r.top + (anim_from_.bottom - anim_from_.top);
   MoveTo(r);
 
-  if (progress >= 1.0) {
+  if (anim_progress_ >= 1.0) {
     if (anim_hiding_) {
       FinishHide();
     } else {

@@ -133,13 +133,29 @@ inline bool CoversWorkArea(const Rect& window, const Rect& work) {
          window.right >= work.right && window.bottom >= work.bottom;
 }
 
-/// 缓动：ease-out cubic。滑动不能是匀速的——匀速看起来"卡"，而且末端硬停。
-/// p 会被夹到 [0,1]，避免定时器抖动导致过冲。
-inline double EaseOutCubic(double p) {
+/// 缓动：二次曲线。**收起和弹回用的不是同一条**：
+///  * 收起（accelerate）用 ease-in —— 先慢后快，像被吸走；
+///  * 弹回（decelerate）用 ease-out —— 先快后慢，稳稳停住。
+///
+/// 早先两边都用 ease-out，收起的**第一帧**就走完了 27% 的距离（700px 的窗口
+/// 一帧跳 190px），看起来就是"啪"地一下没了，也就是用户说的"生硬"。
+///
+/// p 会被夹到 [0,1]，避免帧步进的累积误差导致过冲。
+inline double ClampProgress(double p) {
   if (p <= 0.0) return 0.0;
   if (p >= 1.0) return 1.0;
-  const double inv = 1.0 - p;
-  return 1.0 - inv * inv * inv;
+  return p;
+}
+
+inline double EaseInQuad(double p) {
+  const double t = ClampProgress(p);
+  return t * t;
+}
+
+inline double EaseOutQuad(double p) {
+  const double t = ClampProgress(p);
+  const double inv = 1.0 - t;
+  return 1.0 - inv * inv;
 }
 
 }  // namespace wxb

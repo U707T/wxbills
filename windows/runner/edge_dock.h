@@ -27,9 +27,9 @@ class EdgeDock {
     int tolerance = 8;          // 离工作区顶边多少逻辑像素算贴上
     int peek = 4;               // 藏起来后露出的条高
     int strip_margin = 3;       // 露出条两侧的热区容差
-    int leave_delay_ms = 350;   // 鼠标离开多久后开始收（防止"路过"就收）
-    int animation_ms = 160;     // 滑动时长
-    int idle_tick_ms = 100;     // 贴顶但没收起时的轮询间隔
+    int leave_delay_ms = 180;   // 鼠标离开多久后开始收（防"路过"，但别拖沓）
+    int animation_ms = 150;     // 滑动时长（收起用 ease-in、弹回用 ease-out）
+    int idle_tick_ms = 80;      // 贴顶但没收起时的轮询间隔
     int hidden_tick_ms = 40;    // 藏起来时的轮询间隔：要"碰到就弹回来"，得密一点
     int undocked_tick_ms = 250; // 没贴边时的轮询间隔：只为不错过"挪到顶边"
     int anim_tick_ms = 16;      // 动画帧间隔（~60fps）
@@ -140,7 +140,11 @@ class EdgeDock {
 
   RECT anim_from_{};
   RECT anim_to_{};
-  ULONGLONG anim_start_ = 0;
+  /// 动画进度（0..1），按**帧**累积而不是按墙钟算：
+  /// WM_TIMER 在消息队列忙（Flutter 正在出帧）时会晚到，用墙钟算就会
+  /// "一帧跳好远"——那正是滑动看起来生硬的原因。按帧步进最坏只是动画
+  /// 稍微拖长一点，但每一帧的位移是连续的。
+  double anim_progress_ = 0.0;
   bool anim_hiding_ = false;
 };
 
