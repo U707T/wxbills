@@ -363,4 +363,133 @@ void main() {
 
     await cleanup(tester, tmp);
   });
+
+  // ------------------------------------------------------------ 宽度自适应
+  //
+  // 窄布局不是「另一个模式」，只是窗口拖窄之后的排版。360 是 runner 允许的
+  // 最小宽度（windows/runner/win32_window.cpp 的 kMinWindowWidth），
+  // 所以这里就按最窄的情况验，保证拖到底也不会出黄黑条。
+
+  Future<void> setWindowWidth(WidgetTester tester, double width,
+      {double height = 720}) async {
+    // 用 tester.view 而不是 binding.setSurfaceSize：MediaQuery 读的是
+    // FlutterView 的「物理尺寸 / DPR」，只改 surface 传不到 MediaQuery。
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = Size(width, height);
+    addTearDown(tester.view.reset);
+  }
+
+  testWidgets('窗口拖到最窄（360）：自动切窄布局，且不溢出', (tester) async {
+    final (tmp, controller) = await buildController(tester, bills: [
+      sample('a', 3100, note: '客户A'),
+      sample('b', 1050),
+    ]);
+    // 窄布局只在桌面端生效（手机本来就是窄的，见 AppLayout）
+    WindowShell.debugSupportedOverride = true;
+    await setWindowWidth(tester, 360);
+
+    await tester.pumpWidget(WxBillsApp(controller: controller));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull,
+        reason: '最窄宽度下也不能有 RenderFlex 溢出');
+
+    // 头部：低频入口（重新识别 / 贴顶）收进「更多」，同步和设置仍是一键
+    expect(find.byIcon(Icons.more_vert), findsOneWidget);
+    expect(find.byIcon(Icons.restart_alt), findsNothing);
+    expect(find.byIcon(Icons.sync_rounded), findsOneWidget);
+    expect(find.byIcon(Icons.settings_outlined), findsOneWidget);
+
+    // 底栏换成短标签：长标签在 360px 里会挤成省略号
+    expect(find.text('导入'), findsOneWidget);
+    expect(find.text('扫描'), findsOneWidget);
+    expect(find.text('刷新'), findsOneWidget);
+
+    // 金额、合计、排序这些核心信息一个都不能少
+    expect(find.text('¥ 31'), findsOneWidget);
+    expect(find.textContaining('合计'), findsOneWidget);
+    expect(find.text('金额 ↓'), findsOneWidget);
+
+    await cleanup(tester, tmp);
+  });
+
+  testWidgets('窄窗口的「更多」菜单里能点到重新识别', (tester) async {
+    final (tmp, controller) = await buildController(tester, bills: [sample('a', 1050)]);
+    WindowShell.debugSupportedOverride = true;
+    await setWindowWidth(tester, 360);
+
+    await tester.pumpWidget(WxBillsApp(controller: controller));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byIcon(Icons.more_vert));
+    await tester.pumpAndSettle();
+    expect(find.text('重新识别全部'), findsOneWidget,
+        reason: '收进菜单的入口必须真的能点到');
+
+    // 点空白收起菜单，别把弹出的路由留到用例结束
+    await tester.tapAt(const Offset(8, 600));
+    await tester.pumpAndSettle();
+
+    await cleanup(tester, tmp);
+  });
+
+  testWidgets('窗口拉宽后恢复宽布局：四个入口直接摆出来', (tester) async {
+    final (tmp, controller) = await buildController(tester, bills: [sample('a', 1050)]);
+    WindowShell.debugSupportedOverride = true;
+    await setWindowWidth(tester, 1000);
+
+    await tester.pumpWidget(WxBillsApp(controller: controller));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(find.byIcon(Icons.more_vert), findsNothing, reason: '宽窗口不该有「更多」');
+    expect(find.byIcon(Icons.restart_alt), findsOneWidget);
+    expect(find.text('导入相册'), findsOneWidget);
+
+    await cleanup(tester, tmp);
+  });
+
+  testWidgets('中间宽度来回复位都不溢出（420 / 441 / 700）', (tester) async {
+    final (tmp, controller) = await buildController(tester, bills: [
+      sample('a', 3100, note: '客户A'),
+      sample('b', 1050),
+    ]);
+    WindowShell.debugSupportedOverride = true;
+    await setWindowWidth(tester, 700);
+
+    await tester.pumpWidget(WxBillsApp(controller: controller));
+    await tester.pumpAndSettle();
+
+    // 拖窗口时会在「宽布局」和「窄布局」之间来回切，两个方向的边界都要稳：
+    // 420 是窄布局、441 刚好跨过断点，700 是普通桌面宽度。
+    for (final width in [360.0, 420.0, 441.0, 700.0, 1000.0, 360.0]) {
+      tester.view.physicalSize = Size(width, 700);
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull, reason: '$width px 宽度下溢出了');
+    }
+
+    await cleanup(tester, tmp);
+  });
+
+  testWidgets('窄窗口的设置页：用户名/密码竖排，按钮不挤爆', (tester) async {
+    final (tmp, controller) = await buildController(tester);
+    WindowShell.debugSupportedOverride = true;
+    await setWindowWidth(tester, 360);
+
+    await tester.pumpWidget(WxBillsApp(controller: controller));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(Icons.settings_outlined));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull,
+        reason: '窄窗口的设置页也不能溢出（三个按钮会退化成图标）');
+
+    // 0=服务器地址，1=用户名，2=密码：窄窗口里后两个必须竖排
+    final fields = find.byType(TextField);
+    final userDy = tester.getTopLeft(fields.at(1)).dy;
+    final passDy = tester.getTopLeft(fields.at(2)).dy;
+    expect(passDy, greaterThan(userDy), reason: '窄窗口里两个输入框应该竖着排');
+
+    await cleanup(tester, tmp);
+  });
 }

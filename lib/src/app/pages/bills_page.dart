@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import '../../model/bill.dart';
 import '../../platform/window_shell.dart';
 import '../app_controller.dart';
+import '../layout.dart';
 import '../theme.dart';
 import '../widgets/bill_tile.dart';
 import '../widgets/ui_kit.dart';
@@ -238,42 +239,19 @@ class _BillsPageState extends State<BillsPage> {
   @override
   Widget build(BuildContext context) {
     final bills = c.visibleBills;
+    // 窄布局：Windows 上把窗口拖窄（runner 允许到 360）时，同一套界面换成
+    // 「一列列表」的排版 —— 头部收图标、排序独占一行、底部按钮用短标签。
+    final narrow = AppLayout.isNarrow(context);
 
     return Column(
       children: [
         GreenHeader(
           title: '收款单管理',
           subtitle: _subtitle(),
-          actions: [
-            HeaderIconButton(
-              icon: Icons.restart_alt,
-              tooltip: '重新识别全部（含之前没识别出来的）',
-              onPressed: () => c.scan(force: true),
-            ),
-            HeaderIconButton(
-              // 上次同步失败：图标直接换成「云断开」，不用等下次弹窗才知道
-              icon: c.syncFailed ? Icons.cloud_off_rounded : Icons.sync_rounded,
-              tooltip: c.syncFailed
-                  ? '上次同步失败：${c.store.sync.lastSyncMessage}\n点一下重试'
-                  : '立即同步（WebDAV）',
-              onPressed: () => c.runSync(),
-            ),
-            // 贴边隐藏开着时才出现：Windows 的 Aero Snap 会把"拖到顶边"变成
-            // 最大化，所以贴顶只能点一下，不给入口就等于没有这个功能。
-            if (WindowShell.isSupported && c.windowPrefs.edgeHide)
-              HeaderIconButton(
-                icon: Icons.vertical_align_top,
-                tooltip: '贴到屏幕顶部（鼠标离开自动收起）',
-                onPressed: () => unawaited(c.snapWindowToTop()),
-              ),
-            HeaderIconButton(
-              icon: Icons.settings_outlined,
-              tooltip: '设置',
-              onPressed: widget.onOpenSettings,
-            ),
-          ],
+          compact: narrow,
+          actions: narrow ? _narrowHeaderActions() : _wideHeaderActions(),
         ),
-        _toolbar(),
+        _toolbar(narrow: narrow),
         if (c.busy)
           BusyBar(
             label: c.busyLabel,
@@ -311,7 +289,10 @@ class _BillsPageState extends State<BillsPage> {
               : ContentWidth(
                   child: ListView.separated(
                     controller: _scrollCtrl,
-                    padding: const EdgeInsets.fromLTRB(14, 10, 14, 20),
+                    // 窄窗口本来就只有 360px，两侧留白从 14 收到 10，
+                    // 一行能多放 8px 的金额/备注
+                    padding: EdgeInsets.fromLTRB(
+                        narrow ? 10 : 14, 10, narrow ? 10 : 14, 20),
                     itemCount: bills.length,
                     separatorBuilder: (_, _) => const SizedBox(height: 8),
                     itemBuilder: (context, i) {
@@ -324,6 +305,7 @@ class _BillsPageState extends State<BillsPage> {
                           // 那会把用户刚改的金额/刚删的记录用旧快照覆盖回去。
                           enabled: !c.busy,
                           flashing: c.flashId == b.id,
+                          compact: narrow,
                           controller: c,
                           onEdit: () => _editBill(b),
                           onRefresh: () => _confirmRefresh([b]),
@@ -335,8 +317,78 @@ class _BillsPageState extends State<BillsPage> {
                   ),
                 ),
         ),
-        _bottomBar(bills),
+        _bottomBar(bills, narrow: narrow),
       ],
+    );
+  }
+
+  // ---------------------------------------------------------------- 头部动作
+
+  /// 宽模式：四个入口全摆出来（列表页最常用的就这几个）。
+  List<Widget> _wideHeaderActions() {
+    return [
+      HeaderIconButton(
+        icon: Icons.restart_alt,
+        tooltip: '重新识别全部（含之前没识别出来的）',
+        onPressed: () => c.scan(force: true),
+      ),
+      _syncButton(),
+      // 贴边隐藏开着时才出现：Windows 的 Aero Snap 会把"拖到顶边"变成
+      // 最大化，所以贴顶只能点一下，不给入口就等于没有这个功能。
+      if (WindowShell.isSupported && c.windowPrefs.edgeHide)
+        HeaderIconButton(
+          icon: Icons.vertical_align_top,
+          tooltip: '贴到屏幕顶部（鼠标离开自动收起）',
+          onPressed: () => unawaited(c.snapWindowToTop()),
+        ),
+      HeaderIconButton(
+        icon: Icons.settings_outlined,
+        tooltip: '设置',
+        onPressed: widget.onOpenSettings,
+      ),
+    ];
+  }
+
+  /// 窄模式：一行只剩 360px，标题和副标题（合计金额）要占掉一半，
+  /// 剩下的位置只够两个图标 —— 把「重新识别 / 贴顶」这类低频入口收进「更多」，
+  /// 高频的同步和设置仍然一键可达。
+  List<Widget> _narrowHeaderActions() {
+    return [
+      _syncButton(compact: true),
+      HeaderIconButton(
+        icon: Icons.settings_outlined,
+        tooltip: '设置',
+        compact: true,
+        onPressed: widget.onOpenSettings,
+      ),
+      HeaderMenuButton(
+        compact: true,
+        entries: [
+          HeaderMenuEntry(
+            icon: Icons.restart_alt,
+            label: '重新识别全部',
+            onSelected: () => c.scan(force: true),
+          ),
+          if (WindowShell.isSupported && c.windowPrefs.edgeHide)
+            HeaderMenuEntry(
+              icon: Icons.vertical_align_top,
+              label: '贴到屏幕顶部',
+              onSelected: () => unawaited(c.snapWindowToTop()),
+            ),
+        ],
+      ),
+    ];
+  }
+
+  /// 同步按钮：上次失败时图标直接换成「云断开」，不用等下次弹窗才知道。
+  Widget _syncButton({bool compact = false}) {
+    return HeaderIconButton(
+      icon: c.syncFailed ? Icons.cloud_off_rounded : Icons.sync_rounded,
+      tooltip: c.syncFailed
+          ? '上次同步失败：${c.store.sync.lastSyncMessage}\n点一下重试'
+          : '立即同步（WebDAV）',
+      compact: compact,
+      onPressed: () => c.runSync(),
     );
   }
 
@@ -363,10 +415,22 @@ class _BillsPageState extends State<BillsPage> {
     if (ok == true) c.removeBill(bill.id);
   }
 
-  Widget _toolbar() {
+  Widget _toolbar({required bool narrow}) {
+    final hint = Text(
+      _toolbarHint(),
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      textAlign: narrow ? TextAlign.left : TextAlign.right,
+      style: TextStyle(
+        fontSize: narrow ? 10.5 : 11.5,
+        color: Theme.of(context).brightness == Brightness.dark
+            ? Palette.darkTextDim
+            : Palette.textDim,
+      ),
+    );
     return ContentWidth(
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(14, 10, 14, 4),
+        padding: EdgeInsets.fromLTRB(narrow ? 10 : 14, 10, narrow ? 10 : 14, 4),
         child: Column(
           children: [
             Row(
@@ -379,7 +443,7 @@ class _BillsPageState extends State<BillsPage> {
                     onSubmitted: (_) => _locate(),
                     style: const TextStyle(fontSize: 13.5),
                     decoration: InputDecoration(
-                      hintText: '输入金额快速定位，如 31.5',
+                      hintText: narrow ? '输入金额定位' : '输入金额快速定位，如 31.5',
                       prefixIcon: const Icon(Icons.search, size: 18),
                       suffixIcon: _searchCtrl.text.isEmpty
                           ? null
@@ -400,50 +464,50 @@ class _BillsPageState extends State<BillsPage> {
                     onPressed: _locate,
                     style: FilledButton.styleFrom(
                       backgroundColor: Palette.green,
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      padding: EdgeInsets.symmetric(horizontal: narrow ? 12 : 16),
                       shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(10)),
                     ),
-                    child: const Text('定位', style: TextStyle(fontSize: 13.5)),
+                    child: Text('定位',
+                        style: TextStyle(fontSize: narrow ? 12.5 : 13.5)),
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(
-                  child: SegmentedBar<SortMode>(
-                    values: SortMode.values,
-                    labels: SortMode.values.map((e) => e.label).toList(),
-                    selected: c.sort,
-                    onChanged: c.setSort,
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Flexible(
-                  child: Text(
-                    _toolbarHint(),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    textAlign: TextAlign.right,
-                    style: TextStyle(
-                      fontSize: 11.5,
-                      color: Theme.of(context).brightness == Brightness.dark
-                          ? Palette.darkTextDim
-                          : Palette.textDim,
+            SizedBox(height: narrow ? 6 : 8),
+            if (narrow) ...[
+              // 窄窗口里「四个排序段 + 上次扫描」挤不进一行：让排序独占一行，
+              // 提示语挪到下面（它只是补充信息，不该抢排序的位置）。
+              SegmentedBar<SortMode>(
+                values: SortMode.values,
+                labels: SortMode.values.map((e) => e.label).toList(),
+                selected: c.sort,
+                onChanged: c.setSort,
+              ),
+              const SizedBox(height: 5),
+              Align(alignment: Alignment.centerLeft, child: hint),
+            ] else
+              Row(
+                children: [
+                  Expanded(
+                    child: SegmentedBar<SortMode>(
+                      values: SortMode.values,
+                      labels: SortMode.values.map((e) => e.label).toList(),
+                      selected: c.sort,
+                      onChanged: c.setSort,
                     ),
                   ),
-                ),
-              ],
-            ),
+                  const SizedBox(width: 10),
+                  Flexible(child: hint),
+                ],
+              ),
           ],
         ),
       ),
     );
   }
 
-  Widget _bottomBar(List<Bill> visible) {
+  Widget _bottomBar(List<Bill> visible, {required bool narrow}) {
     final canRefresh = c.source.supportsRefreshDate;
     return Container(
       decoration: BoxDecoration(
@@ -459,14 +523,14 @@ class _BillsPageState extends State<BillsPage> {
         ),
       ),
       padding: EdgeInsets.fromLTRB(
-          14, 10, 14, 10 + MediaQuery.of(context).padding.bottom),
+          narrow ? 10 : 14, 10, narrow ? 10 : 14, 10 + MediaQuery.of(context).padding.bottom),
       child: ContentWidth(
         child: Row(
           children: [
             Expanded(
               child: ActionButton(
                 icon: Icons.folder_open,
-                label: '导入相册',
+                label: narrow ? '导入' : '导入相册',
                 onPressed: c.addFolder,
               ),
             ),
@@ -476,7 +540,9 @@ class _BillsPageState extends State<BillsPage> {
                 icon: c.scanning
                     ? Icons.stop_circle_outlined
                     : Icons.document_scanner_outlined,
-                label: c.scanning ? '停止扫描' : '扫描识别',
+                label: narrow
+                    ? (c.scanning ? '停止' : '扫描')
+                    : (c.scanning ? '停止扫描' : '扫描识别'),
                 primary: true,
                 // 扫描中同一个按钮变成「停止」；同步 / 刷新日期在跑时只变灰，
                 // 别让它跟着转圈（用户会以为是扫描在跑）。
@@ -490,7 +556,7 @@ class _BillsPageState extends State<BillsPage> {
                 icon: canRefresh
                     ? Icons.schedule_rounded
                     : Icons.cloud_sync_outlined,
-                label: canRefresh ? '刷新日期' : '同步',
+                label: canRefresh ? (narrow ? '刷新' : '刷新日期') : '同步',
                 onPressed: canRefresh
                     ? () => _confirmRefresh(visible.isEmpty ? c.allBills : visible)
                     : () => c.runSync(),

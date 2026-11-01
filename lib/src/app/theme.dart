@@ -34,6 +34,12 @@ class Dimens {
 
   /// 桌面端内容最大宽度（手机上无影响）。
   static const double maxContentWidth = 1180;
+
+  /// 窄模式断点（逻辑像素）：窗口比它窄时切成「一列列表」的窄布局。
+  ///
+  /// 取 440 是因为再宽一点，工具栏的「搜索 + 定位 + 四个排序段」就还能排在一行；
+  /// 再窄下去只能靠换行/省略号，那时候不如直接换成窄布局。
+  static const double narrowBreakpoint = 440;
 }
 
 ThemeData buildTheme(Brightness brightness) {

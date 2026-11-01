@@ -111,6 +111,7 @@ class GreenHeader extends StatelessWidget {
     this.subtitle,
     this.trailing,
     this.actions = const [],
+    this.compact = false,
   });
 
   final String title;
@@ -118,11 +119,19 @@ class GreenHeader extends StatelessWidget {
   final Widget? trailing;
   final List<Widget> actions;
 
+  /// 窄模式：标题小一号、上下留白收窄，副标题强制一行（放不下就省略）。
+  ///
+  /// 副标题里是「共 N 张 · 合计 ¥X」，窄窗口下也必须有 —— 那是这屏最重要的
+  /// 信息，宁可省略号也不能像之前那样整段换行把头部撑成三行。
+  final bool compact;
+
   @override
   Widget build(BuildContext context) {
     final top = MediaQuery.of(context).padding.top;
     return Container(
-      padding: EdgeInsets.fromLTRB(18, 14 + top, 12, 14),
+      padding: compact
+          ? EdgeInsets.fromLTRB(12, 8 + top, 6, 8)
+          : EdgeInsets.fromLTRB(18, 14 + top, 12, 14),
       decoration: const BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topLeft,
@@ -139,20 +148,24 @@ class GreenHeader extends StatelessWidget {
               children: [
                 Text(
                   title,
-                  style: const TextStyle(
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
                     color: Colors.white,
-                    fontSize: 19,
+                    fontSize: compact ? 17 : 19,
                     fontWeight: FontWeight.w700,
                     height: 1.2,
                   ),
                 ),
                 if (subtitle != null) ...[
-                  const SizedBox(height: 4),
+                  SizedBox(height: compact ? 2 : 4),
                   Text(
                     subtitle!,
-                    style: const TextStyle(
-                      color: Color(0xCCFFFFFF),
-                      fontSize: 12.5,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: const Color(0xCCFFFFFF),
+                      fontSize: compact ? 11.5 : 12.5,
                       height: 1.3,
                     ),
                   ),
@@ -175,19 +188,89 @@ class HeaderIconButton extends StatelessWidget {
     required this.icon,
     required this.onPressed,
     this.tooltip,
+    this.compact = false,
   });
 
   final IconData icon;
   final VoidCallback onPressed;
   final String? tooltip;
 
+  /// 窄模式：34×34（默认 40×40），一行才排得下三个图标 + 标题。
+  final bool compact;
+
   @override
   Widget build(BuildContext context) {
+    final side = compact ? 34.0 : 40.0;
     return IconButton(
       onPressed: onPressed,
-      icon: Icon(icon, color: Colors.white, size: 21),
+      icon: Icon(icon, color: Colors.white, size: compact ? 19 : 21),
       tooltip: tooltip,
       visualDensity: VisualDensity.compact,
+      padding: EdgeInsets.zero,
+      constraints: BoxConstraints.tightFor(width: side, height: side),
+    );
+  }
+}
+
+/// 「更多」菜单里的一项。
+class HeaderMenuEntry {
+  const HeaderMenuEntry({
+    required this.icon,
+    required this.label,
+    required this.onSelected,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback onSelected;
+}
+
+/// 绿色头部右侧的「更多」菜单。
+///
+/// 窄模式下一行只有 360px：标题和副标题要占掉一半，剩下的位置放不下四个
+/// 图标按钮。与其让按钮挤成一团，不如像 QQ 那样把低频入口（重新识别 /
+/// 贴顶）收进菜单，头部只留「同步 + 设置 + 更多」。
+class HeaderMenuButton extends StatelessWidget {
+  const HeaderMenuButton({
+    super.key,
+    required this.entries,
+    this.compact = false,
+  });
+
+  final List<HeaderMenuEntry> entries;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    final side = compact ? 34.0 : 40.0;
+    return PopupMenuButton<int>(
+      tooltip: '更多',
+      padding: EdgeInsets.zero,
+      position: PopupMenuPosition.under,
+      icon: Icon(Icons.more_vert, color: Colors.white),
+      iconSize: compact ? 19 : 21,
+      // 注意 `constraints` 是**菜单**的约束，不是按钮的：写在这里会把弹出来的
+      // 菜单挤成 34px 宽（每一项都溢出）。按钮尺寸要走 style。
+      style: IconButton.styleFrom(
+        minimumSize: Size.square(side),
+        maximumSize: Size.square(side),
+        padding: EdgeInsets.zero,
+      ),
+      onSelected: (index) => entries[index].onSelected(),
+      itemBuilder: (_) => [
+        for (var i = 0; i < entries.length; i++)
+          PopupMenuItem<int>(
+            value: i,
+            height: 42,
+            child: Row(
+              children: [
+                Icon(entries[i].icon, size: 18, color: Palette.textDim),
+                const SizedBox(width: 10),
+                Text(entries[i].label, style: const TextStyle(fontSize: 13.5)),
+              ],
+            ),
+          ),
+      ],
     );
   }
 }
@@ -458,26 +541,54 @@ class ActionButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
-      width: double.infinity,
-      child: FilledButton.tonalIcon(
-        onPressed: (busy || !enabled) ? null : onPressed,
-        icon: busy
-            ? const SizedBox(
-                width: 14,
-                height: 14,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )
-            : Icon(icon, size: 17),
-        label: Text(label, style: const TextStyle(fontSize: 13)),
-        style: FilledButton.styleFrom(
-          minimumSize: const Size(0, 40),
-          padding: const EdgeInsets.symmetric(horizontal: 10),
-          backgroundColor: primary ? Palette.green : null,
-          foregroundColor: primary ? Colors.white : null,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        ),
-      ),
-    );
+    // 用 LayoutBuilder 而不是让调用方传「窄不窄」：同一行里的按钮宽度取决于
+    // 有几个按钮、外层卡片留白多少，写死一个标志位总有一处对不上。
+    return LayoutBuilder(builder: (context, constraints) {
+      // 放不下「图标 + 中文标签」时只留图标，标签挂到 tooltip 上。
+      // 窄模式设置页那一行三个按钮正好落在 96px 上下，硬撑只会挤成省略号。
+      final iconOnly = constraints.maxWidth < 104;
+      final style = FilledButton.styleFrom(
+        minimumSize: const Size(0, 40),
+        padding: EdgeInsets.symmetric(horizontal: iconOnly ? 0 : 10),
+        backgroundColor: primary ? Palette.green : null,
+        foregroundColor: primary ? Colors.white : null,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      );
+      // 自己拼 Row 而不是用 *.icon 构造：那些构造里的标签不可压缩，
+      // 宽度差几个像素就直接 RenderFlex overflow（黄黑条）。
+      final content = Row(
+        mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          if (busy)
+            const SizedBox(
+              width: 14,
+              height: 14,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          else
+            Icon(icon, size: 17),
+          if (!iconOnly) ...[
+            const SizedBox(width: 6),
+            Flexible(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 13),
+              ),
+            ),
+          ],
+        ],
+      );
+      final onTap = (busy || !enabled) ? null : onPressed;
+      final button = primary
+          ? FilledButton(onPressed: onTap, style: style, child: content)
+          : FilledButton.tonal(onPressed: onTap, style: style, child: content);
+      return SizedBox(
+        width: double.infinity,
+        child: iconOnly ? Tooltip(message: label, child: button) : button,
+      );
+    });
   }
 }

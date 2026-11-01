@@ -34,8 +34,12 @@ static int g_active_window_count = 0;
 
 // 最小窗口尺寸（逻辑像素）。记忆几何 / 贴边隐藏都可能留下一个窄到没法用的
 // 窗口，这里兜一道底：标题栏和按钮永远挪得动、点得到。
-constexpr int kMinWindowWidth = 720;
-constexpr int kMinWindowHeight = 480;
+//
+// 宽度只兜 360：再窄连一张收款单卡片（缩略图 + 金额 + 两个行内按钮）都放不下。
+// 界面在 <440 时会自己换成窄布局（见 Dart 端 AppLayout），所以中间这段宽度
+// 是「可以自由拖」的，不需要额外开关。
+constexpr int kMinWindowWidth = 360;
+constexpr int kMinWindowHeight = 420;
 
 using EnableNonClientDpiScaling = BOOL __stdcall(HWND hwnd);
 

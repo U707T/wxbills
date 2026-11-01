@@ -7,6 +7,7 @@ import '../../data/store.dart';
 import '../../model/bill.dart';
 import '../../platform/window_shell.dart';
 import '../app_controller.dart';
+import '../layout.dart';
 import '../theme.dart';
 import '../widgets/ui_kit.dart';
 
@@ -134,15 +135,22 @@ class _SettingsPageState extends State<SettingsPage> {
   @override
   Widget build(BuildContext context) {
     final cfg = c.store.sync;
+    final narrow = AppLayout.isNarrow(context);
     return Scaffold(
       body: Column(
         children: [
           GreenHeader(
             title: '设置',
             subtitle: 'WebDAV 同步 / 文件夹 / 数据',
+            compact: narrow,
             trailing: IconButton(
               onPressed: () => Navigator.of(context).maybePop(),
-              icon: const Icon(Icons.close, color: Colors.white, size: 21),
+              icon: Icon(Icons.close, color: Colors.white, size: narrow ? 19 : 21),
+              padding: EdgeInsets.zero,
+              constraints: BoxConstraints.tightFor(
+                width: narrow ? 34 : 40,
+                height: narrow ? 34 : 40,
+              ),
             ),
           ),
           Expanded(
@@ -151,7 +159,7 @@ class _SettingsPageState extends State<SettingsPage> {
               child: ListView(
                 padding: const EdgeInsets.fromLTRB(14, 14, 14, 28),
                 children: [
-                  _syncCard(cfg),
+                  _syncCard(cfg, narrow: narrow),
                   const SizedBox(height: 12),
                   _foldersCard(),
                   if (WindowShell.isSupported) ...[
@@ -171,7 +179,31 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  Widget _syncCard(SyncConfig cfg) {
+  Widget _syncCard(SyncConfig cfg, {required bool narrow}) {
+    final userField = TextField(
+      controller: _user,
+      autocorrect: false,
+      onChanged: (_) => _dirty = true,
+      style: const TextStyle(fontSize: 13.5),
+      decoration: const InputDecoration(labelText: '用户名'),
+    );
+    final passField = TextField(
+      controller: _pass,
+      obscureText: !_showPass,
+      autocorrect: false,
+      onChanged: (_) => _dirty = true,
+      style: const TextStyle(fontSize: 13.5),
+      decoration: InputDecoration(
+        labelText: '密码 / 应用密码',
+        suffixIcon: IconButton(
+          icon: Icon(
+            _showPass ? Icons.visibility_off : Icons.visibility,
+            size: 17,
+          ),
+          onPressed: () => setState(() => _showPass = !_showPass),
+        ),
+      ),
+    );
     return AppCard(
       padding: const EdgeInsets.fromLTRB(14, 14, 14, 12),
       child: Column(
@@ -239,39 +271,20 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
           ),
           const SizedBox(height: 10),
-          Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: _user,
-                  autocorrect: false,
-                  onChanged: (_) => _dirty = true,
-                  style: const TextStyle(fontSize: 13.5),
-                  decoration: const InputDecoration(labelText: '用户名'),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: TextField(
-                  controller: _pass,
-                  obscureText: !_showPass,
-                  autocorrect: false,
-                  onChanged: (_) => _dirty = true,
-                  style: const TextStyle(fontSize: 13.5),
-                  decoration: InputDecoration(
-                    labelText: '密码 / 应用密码',
-                    suffixIcon: IconButton(
-                      icon: Icon(
-                        _showPass ? Icons.visibility_off : Icons.visibility,
-                        size: 17,
-                      ),
-                      onPressed: () => setState(() => _showPass = !_showPass),
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
+          // 窄窗口里并排两个输入框各只剩 ~140px，「密码 / 应用密码」这种长标签
+          // 会被挤掉半个字，所以窄的时候竖着排。
+          if (narrow) ...[
+            userField,
+            const SizedBox(height: 10),
+            passField,
+          ] else
+            Row(
+              children: [
+                Expanded(child: userField),
+                const SizedBox(width: 10),
+                Expanded(child: passField),
+              ],
+            ),
           const SizedBox(height: 6),
           SwitchListTile(
             value: _insecure,

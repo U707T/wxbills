@@ -20,6 +20,7 @@ class BillTile extends StatelessWidget {
     required this.onCopy,
     required this.onDelete,
     this.enabled = true,
+    this.compact = false,
   });
 
   final Bill bill;
@@ -36,6 +37,10 @@ class BillTile extends StatelessWidget {
   /// 这一行上的编辑与删除会被批处理的旧快照覆盖，干脆先不让点。
   final bool enabled;
 
+  /// 窄模式：缩略图、金额、内边距各收一档，360px 宽也能把「金额 + 备注 +
+  /// 两个行内按钮」摆在一行里，不横向溢出。
+  final bool compact;
+
   @override
   Widget build(BuildContext context) {
     final dark = Theme.of(context).brightness == Brightness.dark;
@@ -45,12 +50,14 @@ class BillTile extends StatelessWidget {
         : (dark ? Palette.darkText : Palette.text);
 
     final content = Padding(
-      padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
+      padding: compact
+          ? const EdgeInsets.fromLTRB(10, 8, 6, 8)
+          : const EdgeInsets.fromLTRB(12, 10, 8, 10),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          ThumbView(file: thumb, size: 58),
-          const SizedBox(width: 12),
+          ThumbView(file: thumb, size: compact ? 50 : 58),
+          SizedBox(width: compact ? 10 : 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -66,7 +73,7 @@ class BillTile extends StatelessWidget {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: amountStyle(context,
-                            size: 20,
+                            size: compact ? 18 : 20,
                             color: amountColor,
                             weight: FontWeight.w700),
                       ),
@@ -102,38 +109,26 @@ class BillTile extends StatelessWidget {
           ),
           const SizedBox(width: 6),
           if (controller.source.supportsRefreshDate)
-            IconButton(
-              onPressed: enabled ? onRefresh : null,
+            _roundIcon(
+              icon: Icons.refresh_rounded,
               tooltip: '刷新这张图片的日期（让 QQ/相册当成新图）',
-              icon: const Icon(Icons.refresh_rounded, size: 18),
-              style: IconButton.styleFrom(
-                backgroundColor: dark ? const Color(0xFF262A2C) : Palette.greenSoft,
-                foregroundColor: Palette.green,
-                minimumSize: const Size(34, 34),
-                padding: EdgeInsets.zero,
-              ),
+              onTap: enabled ? onRefresh : null,
+              background: dark ? const Color(0xFF262A2C) : Palette.greenSoft,
+              foreground: Palette.green,
             )
           else if (controller.source.supportsCopyImage)
-            IconButton(
-              onPressed: enabled ? onCopy : null,
+            _roundIcon(
+              icon: Icons.content_copy_rounded,
               tooltip: '复制图片（可直接粘贴到聊天窗口；本机没有原图时复制缩略图）',
-              icon: const Icon(Icons.content_copy_rounded, size: 17),
-              style: IconButton.styleFrom(
-                backgroundColor: dark ? const Color(0xFF262A2C) : Palette.greenSoft,
-                foregroundColor: Palette.green,
-                minimumSize: const Size(34, 34),
-                padding: EdgeInsets.zero,
-              ),
+              onTap: enabled ? onCopy : null,
+              background: dark ? const Color(0xFF262A2C) : Palette.greenSoft,
+              foreground: Palette.green,
             ),
-          IconButton(
-            onPressed: enabled ? onDelete : null,
+          _roundIcon(
+            icon: Icons.delete_outline_rounded,
             tooltip: enabled ? '删除记录' : '正在扫描/同步，完成后再操作',
-            icon: const Icon(Icons.delete_outline_rounded, size: 18),
-            style: IconButton.styleFrom(
-              foregroundColor: dark ? Palette.darkTextDim : Palette.textDim,
-              minimumSize: const Size(34, 34),
-              padding: EdgeInsets.zero,
-            ),
+            onTap: enabled ? onDelete : null,
+            foreground: dark ? Palette.darkTextDim : Palette.textDim,
           ),
         ],
       ),
@@ -160,6 +155,28 @@ class BillTile extends StatelessWidget {
           onTap: enabled ? onEdit : null,
           child: content,
         ),
+      ),
+    );
+  }
+
+  /// 行内圆形小按钮。窄模式缩到 30×30：一列 360px 里，
+  /// 缩略图 + 金额 + 两个按钮要挤在一行。
+  Widget _roundIcon({
+    required IconData icon,
+    required String tooltip,
+    required VoidCallback? onTap,
+    required Color foreground,
+    Color? background,
+  }) {
+    return IconButton(
+      onPressed: onTap,
+      tooltip: tooltip,
+      icon: Icon(icon, size: compact ? 17 : 18),
+      style: IconButton.styleFrom(
+        backgroundColor: background,
+        foregroundColor: foreground,
+        minimumSize: Size.square(compact ? 30 : 34),
+        padding: EdgeInsets.zero,
       ),
     );
   }

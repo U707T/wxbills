@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'app_controller.dart';
+import 'layout.dart';
 import 'pages/bills_page.dart';
 import 'pages/settings_page.dart';
 import 'theme.dart';
@@ -136,11 +137,14 @@ class _LoadingShell extends StatelessWidget {
   Widget build(BuildContext context) {
     final dark = Theme.of(context).brightness == Brightness.dark;
     final card = dark ? Palette.darkCard : Palette.card;
+    // 窄模式的头部比宽模式矮一截（17px 标题 + 单行副标题）：骨架也得跟着变，
+    // 否则数据到达的那一刻整页会往上跳 18px。
+    final narrow = AppLayout.isNarrow(context);
     return Column(
       children: [
-        // 高度与 BillsPage 的 GreenHeader（14+标题+4+副标题+14 ≈ 71）对齐
+        // 高度与 BillsPage 的 GreenHeader 对齐（宽 71 / 窄 54）
         Container(
-          height: 71 + MediaQuery.of(context).padding.top,
+          height: (narrow ? 54 : 71) + MediaQuery.of(context).padding.top,
           decoration: const BoxDecoration(
             gradient: LinearGradient(
               begin: Alignment.topLeft,
@@ -151,12 +155,12 @@ class _LoadingShell extends StatelessWidget {
         ),
         Expanded(
           child: ListView.separated(
-            padding: const EdgeInsets.fromLTRB(14, 12, 14, 20),
+            padding: EdgeInsets.fromLTRB(narrow ? 10 : 14, 12, narrow ? 10 : 14, 20),
             itemCount: 6,
             physics: const NeverScrollableScrollPhysics(),
             separatorBuilder: (_, _) => const SizedBox(height: 8),
             itemBuilder: (_, _) => Container(
-              height: 78,
+              height: narrow ? 70 : 78,
               decoration: BoxDecoration(
                 color: card,
                 borderRadius: BorderRadius.circular(Dimens.cardRadius),
