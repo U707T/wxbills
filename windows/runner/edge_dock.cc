@@ -3,6 +3,9 @@
 #include <dwmapi.h>
 #include <flutter_windows.h>
 
+#include <cstdio>
+#include <string>
+
 namespace {
 
 // 老 SDK 里没有这个枚举值（Windows 10 1607 起才有），自己补一个
@@ -29,9 +32,62 @@ int ClampPadding(int value) {
   return value;
 }
 
+// ---------------------------------------------------------------- 行为日志
+//
+// `--edge-trace` 才写，平时一行都不执行。为什么要有：贴边隐藏的每次判断都
+// 取决于"现在谁在前台、鼠标在哪"，用户描述"它自己弹了一下"时，代码里可能
+// 有五条路径，没有日志只能猜。
+
+bool g_trace_enabled = false;
+
+constexpr wchar_t kTraceFileName[] = L"wxbills-edge.log";
+
+void AppendTraceLine(const std::string& line) {
+  OutputDebugStringA(line.c_str());
+  OutputDebugStringA("\r\n");
+
+  wchar_t buffer[MAX_PATH] = {0};
+  const DWORD length = GetTempPathW(MAX_PATH, buffer);
+  if (length == 0) return;
+  std::wstring path(buffer, length);
+  if (!path.empty() && path.back() != L'\\') path.push_back(L'\\');
+  path += kTraceFileName;
+
+  const HANDLE file =
+      CreateFileW(path.c_str(), FILE_APPEND_DATA,
+                  FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
+                  FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE) return;
+  DWORD written = 0;
+  WriteFile(file, line.data(), static_cast<DWORD>(line.size()), &written,
+            nullptr);
+  WriteFile(file, "\r\n", 2, &written, nullptr);
+  CloseHandle(file);
+}
+
+void Trace(const char* event, int a = 0, int b = 0) {
+  if (!g_trace_enabled || event == nullptr) return;
+  SYSTEMTIME now{};
+  GetLocalTime(&now);
+  char stamp[32] = {0};
+  std::snprintf(stamp, sizeof(stamp), "%02u:%02u:%02u.%03u", now.wHour,
+                now.wMinute, now.wSecond, now.wMilliseconds);
+  std::string line = "edge ";
+  line += stamp;
+  line += " ";
+  line += event;
+  line += " a=";
+  line += std::to_string(a);
+  line += " b=";
+  line += std::to_string(b);
+  AppendTraceLine(line);
+}
+
 }  // namespace
 
 EdgeDock::~EdgeDock() { Detach(); }
+
+void EdgeDock::SetTraceEnabled(bool enabled) { g_trace_enabled = enabled; }
 
 // ---------------------------------------------------------------- 生命周期
 
@@ -42,6 +98,7 @@ void EdgeDock::Attach(HWND hwnd, bool enabled) {
   topmost_ = false;
   strip_since_ = 0;
   last_foreground_ = nullptr;
+  accidental_focus_ = false;
   SyncFromWindow();
   if (enabled_) StartIdleTimer();
 }
@@ -53,6 +110,7 @@ void EdgeDock::Detach() {
   topmost_ = false;
   strip_since_ = 0;
   last_foreground_ = nullptr;
+  accidental_focus_ = false;
   dock_ = wxb::DockEdge::kNone;
 }
 
@@ -60,6 +118,8 @@ void EdgeDock::SetEnabled(bool enabled) {
   if (enabled_ == enabled) return;
   enabled_ = enabled;
   strip_since_ = 0;
+  accidental_focus_ = false;
+  Trace("enabled", enabled ? 1 : 0);
   if (!enabled_) {
     // 关掉时先把窗口放回来：否则窗口停在屏幕外，用户只能从任务栏把它"还原"
     ShowNow();
@@ -121,20 +181,41 @@ void EdgeDock::SnapToTop() {
   RestartIdleTimer();  // 换成"贴顶"档频率
 }
 
-bool EdgeDock::ForegroundCoversWorkArea() const {
+bool EdgeDock::ForegroundIsFullscreen() const {
   const HWND foreground = GetForegroundWindow();
-  if (foreground == nullptr || foreground == hwnd_) return false;
+  if (foreground == nullptr || foreground == hwnd_) {
+    return wxb::ShouldSuppressStrip(false, false, false, false, false);
+  }
   DWORD pid = 0;
   GetWindowThreadProcessId(foreground, &pid);
-  if (pid == GetCurrentProcessId()) return false;  // 自己的窗口不算
+  const bool same_process = pid == GetCurrentProcessId();
+  // 桌面（Progman / WorkerW）的矩形就是整块屏幕，但它不是"内容"：
+  // 点一下桌面把条藏起来只会让人以为功能坏了。
+  const bool is_desktop = foreground == GetShellWindow() ||
+                          foreground == GetDesktopWindow();
+  // 最大化窗口：任务栏设成"自动隐藏"时它也会盖满整块屏幕，但它仍然是
+  // 普通窗口，不是用户的"全屏内容"。
+  const bool is_maximized = IsZoomed(foreground) != FALSE;
+  bool covers_monitor = false;
   RECT rect{};
-  if (!GetWindowRect(foreground, &rect)) return false;
-  return wxb::CoversWorkArea(ToWxb(rect), work_);
+  if (!same_process && !is_desktop && !is_maximized &&
+      GetWindowRect(foreground, &rect)) {
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    const HMONITOR monitor =
+        MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST);
+    if (monitor != nullptr && GetMonitorInfoW(monitor, &info)) {
+      covers_monitor = wxb::CoversWorkArea(ToWxb(rect), ToWxb(info.rcMonitor));
+    }
+  }
+  return wxb::ShouldSuppressStrip(true, same_process, is_desktop, is_maximized,
+                                  covers_monitor);
 }
 
 void EdgeDock::SetSuppressed(bool suppressed) {
   if (suppressed_ == suppressed || hwnd_ == nullptr) return;
   suppressed_ = suppressed;
+  Trace("suppress", suppressed ? 1 : 0, static_cast<int>(phase_));
   if (suppressed) {
     // 别人全屏（游戏 / 视频 / 最大化）：连那 4px 也不该留在画面上
     ShowWindow(hwnd_, SW_HIDE);
@@ -212,10 +293,23 @@ void EdgeDock::OnActivated() {
     }
   }
   if (wxb::IsInheritedActivation(has_previous, alive, minimized, visible)) {
+    // 顺位继承：不弹面板，但记下"这个前台是白捡的" —— 否则「前台就不收」
+    // 这条规则会把窗口钉住，下次悬停弹出来之后再也收不回去。
+    // 同时把判据清掉：不清的话它会一直指着那个已经关掉的窗口，
+    // 之后用户真的去点任务栏图标也会被当成"继承"，面板永远叫不出来。
+    accidental_focus_ = true;
+    last_foreground_ = nullptr;
+    Trace("activate.inherited", alive ? 1 : 0, minimized ? 1 : 0);
     return;
   }
 
+  accidental_focus_ = false;
+  Trace("activate.user");
   Reveal();
+}
+
+void EdgeDock::NoteDeactivated() {
+  accidental_focus_ = false;
 }
 
 // ---------------------------------------------------------------- 几何
@@ -356,11 +450,10 @@ bool EdgeDock::CanAutoHide() {
   if (ForegroundIsOwnDialog()) return false;
   // 窗口自己就是前台窗口：用户正在用它，这时候收起来等于"点一下就没"。
   //
-  // 之前没有这一条，于是「从任务栏点回来 / 点了一下面板」之后，只要鼠标不在
-  // 窗口上（点任务栏时本来就不在），180ms 后就又缩回去 —— 用户看到的就是
-  // "刚弹出来就收起"。现在改成：只要这个窗口还拿着前台，就先不收；
-  // 点了别的窗口（失活）之后，鼠标不在上面就照常收。
-  if (GetForegroundWindow() == hwnd_) return false;
+  // 但「顺位继承来的前台」不算：那不是用户想用这个窗口，只是系统把激活
+  // 塞给了我们（见 OnActivated）。这条区分很要紧 —— 少了它，
+  // 一次"关别人的窗口"就能让面板卡在"永远不收"的状态。
+  if (!accidental_focus_ && GetForegroundWindow() == hwnd_) return false;
   return true;
 }
 
@@ -452,7 +545,11 @@ void EdgeDock::OnIdleTick() {
   // 靠它判断这次激活是用户主动的、还是别人关窗口/最小化后顺位继承来的。
   // 我们被激活之后这里不会再覆盖（fg 就是我们自己），所以判据不会被冲掉。
   const HWND fg = GetForegroundWindow();
-  if (fg != nullptr && fg != hwnd_) last_foreground_ = fg;
+  if (fg != nullptr && fg != hwnd_) {
+    last_foreground_ = fg;
+    // 前台已经不是我们了：上一轮"白捡的前台"到此为止
+    accidental_focus_ = false;
+  }
 
   switch (phase_) {
     case Phase::kNormal:
@@ -468,8 +565,8 @@ void EdgeDock::OnIdleTick() {
       }
       break;
     case Phase::kHidden:
-      // 别人全屏时连那条边也躲起来；恢复后自动回来
-      SetSuppressed(ForegroundCoversWorkArea());
+      // 只有真全屏才把条藏起来（最大化窗口不算，见 ShouldSuppressStrip）
+      SetSuppressed(ForegroundIsFullscreen());
       // 唤出要"停一下"才算数：鼠标只是路过屏幕顶边（去点别的窗口的标题栏、
       // 浏览器标签页）时不该把面板拽出来 —— 拽出来之后鼠标一离开又收起，
       // 在用户眼里就是"窗口莫名闪了一下"。
@@ -512,6 +609,7 @@ void EdgeDock::OnLeaveTimeout() {
 
 void EdgeDock::BeginHide() {
   phase_ = Phase::kHiding;
+  Trace("hide.begin");
   // 真正开始收的时候窗口一定可见，这时候量到的不可见边框才是准的
   UpdateFramePadding(true);
   anim_from_ = rest_;
@@ -528,6 +626,7 @@ void EdgeDock::FinishHide() {
   StopTimer(&anim_timer_);
   phase_ = Phase::kHidden;
   strip_since_ = 0;
+  Trace("hide.done");
   MoveTo(anim_to_);  // 消掉最后不足一像素的误差
   // 置顶：那 4px 的条必须能被点到，否则"唤出"只能靠任务栏图标
   SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0,
@@ -541,6 +640,7 @@ void EdgeDock::BeginShow() {
   if (hwnd_ == nullptr) return;
   phase_ = Phase::kShowing;
   strip_since_ = 0;
+  Trace("show.begin");
   RECT current{};
   anim_from_ = GetWindowRect(hwnd_, &current) ? current : anim_to_;
   anim_to_ = rest_;
@@ -554,6 +654,7 @@ void EdgeDock::BeginShow() {
 void EdgeDock::FinishShow() {
   StopTimer(&anim_timer_);
   phase_ = Phase::kNormal;
+  Trace("show.done");
   MoveTo(rest_);
   if (topmost_) {
     SetWindowPos(hwnd_, HWND_NOTOPMOST, 0, 0, 0, 0,

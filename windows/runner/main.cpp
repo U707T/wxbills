@@ -43,6 +43,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   wxb::StartupTraceInit(HasFlag(command_line_arguments, "--startup-trace"));
   wxb::StartupTraceMark("native.entry");
 
+  // 贴边隐藏的行为日志：只有带 --edge-trace 才写。
+  // 这个功能出问题时（"它自己弹了一下"）全看当时的窗口/鼠标状态，
+  // 从界面上什么都看不出来，日志是唯一能复盘的线索。
+  EdgeDock::SetTraceEnabled(HasFlag(command_line_arguments, "--edge-trace"));
+
   // Initialize COM, so that it is available for use in the library and/or
   // plugins.
   ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);

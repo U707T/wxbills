@@ -190,6 +190,21 @@ void TestInheritedActivation() {
   CHECK(wxb::IsInheritedActivation(true, true, false, false));
 }
 
+void TestSuppressStrip() {
+  // 普通窗口 / 最大化窗口（只盖工作区，任务栏还在）→ 条要留着
+  CHECK(!wxb::ShouldSuppressStrip(true, false, false, false, false));
+  // 任务栏设成"自动隐藏"时，最大化窗口会盖满整块屏幕 —— 但它不是全屏内容
+  CHECK(!wxb::ShouldSuppressStrip(true, false, false, true, true));
+  // 真全屏（整块显示器都盖住、且不是最大化）→ 躲起来
+  CHECK(wxb::ShouldSuppressStrip(true, false, false, false, true));
+  // 我们自己的窗口（面板 / 对话框）：不算别人全屏
+  CHECK(!wxb::ShouldSuppressStrip(true, true, false, false, true));
+  // 桌面：矩形就是整块屏幕，但它不是"内容"，点一下桌面不该让条消失
+  CHECK(!wxb::ShouldSuppressStrip(true, false, true, false, true));
+  // 没有前台窗口
+  CHECK(!wxb::ShouldSuppressStrip(false, false, false, false, false));
+}
+
 }  // namespace
 
 int main() {
@@ -199,6 +214,7 @@ int main() {
   TestClampToWork();
   TestCoversWorkArea();
   TestInheritedActivation();
+  TestSuppressStrip();
   TestEase();
 
   std::printf("%d checks, %d failed\n", g_checks, g_failed);

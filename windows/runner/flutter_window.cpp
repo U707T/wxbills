@@ -227,6 +227,7 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
       // 正在失去激活的窗口再抢一次焦点，等于跟系统正在做的焦点切换打架：
       // 一旦被拽回前台就会又来一次 WA_ACTIVE、面板滑出来；鼠标又不在上面，
       // 很快又收起。用户看到的就是「每次切到别的窗口，这个窗口都闪一下再收起」。
+      if (dock_) dock_->NoteDeactivated();
       return 0;
     }
     case WM_CLOSE:

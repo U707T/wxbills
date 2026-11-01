@@ -149,6 +149,24 @@ inline bool IsInheritedActivation(bool has_previous, bool previous_alive,
   return !previous_alive || previous_minimized || !previous_visible;
 }
 
+/// 藏起来的那条边要不要彻底躲开（连 4px 都不留）？
+///
+/// 只有**真全屏**才躲：整块显示器都被别的窗口盖住（游戏 / 全屏视频），
+/// 那种场景下面板上多一条亮边确实很碍眼。
+///
+/// **最大化窗口不算**，哪怕它盖满了整块屏幕（任务栏设成"自动隐藏"时就会
+/// 这样）。这是这条规则最要紧的一次修正：最大化是用户日常最常见的状态，
+/// 早先按"盖住工作区"判断，于是最大化窗口一在前台，条就被 `SW_HIDE`；
+/// `SW_HIDE` 的窗口连任务栏按钮一起消失，用户就再也叫不出面板了
+/// （表现为"收起之后无法触发"）。
+inline bool ShouldSuppressStrip(bool has_foreground, bool same_process,
+                                bool is_desktop, bool is_maximized,
+                                bool covers_monitor) {
+  if (!has_foreground || same_process || is_desktop) return false;
+  if (is_maximized) return false;
+  return covers_monitor;
+}
+
 /// 缓动：二次曲线。**收起和弹回用的不是同一条**：
 ///  * 收起（accelerate）用 ease-in —— 先慢后快，像被吸走；
 ///  * 弹回（decelerate）用 ease-out —— 先快后慢，稳稳停住。

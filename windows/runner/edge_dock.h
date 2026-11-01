@@ -77,6 +77,12 @@ class EdgeDock {
   /// 表现出来就是"关别人的窗口，这个窗口莫名弹出来又收回去"。
   void OnActivated();
 
+  /// `WM_ACTIVATE(WA_INACTIVE)`：失活时把"被动接管的前台"这个标记清掉。
+  ///
+  /// 顺位继承来的激活会让窗口变成"藏着但仍是前台"。如果一直按"前台就不收"
+  /// 处理，下次悬停弹出之后就再也收不回去了（鼠标离开也不收）。
+  void NoteDeactivated();
+
   /// 立刻复位到"露出"状态：Alt+Tab、点任务栏图标、关窗口之前都要调。
   void ShowNow();
 
@@ -85,6 +91,13 @@ class EdgeDock {
 
   /// 保存几何时用这个：隐藏状态下拿到的是"露出时"的矩形，不是屏幕外那个。
   RECT rest_rect() const { return rest_; }
+
+  /// 打开行为日志（`--edge-trace` 启动参数）。默认关，关着的时候零开销。
+  ///
+  /// 这个功能的每一步都取决于"现在谁在前台 / 鼠标在哪"，出问题时从界面
+  /// 完全看不出来。日志写到 `%TEMP%\wxbills-edge.log`，只记状态转换，
+  /// 不记每个 tick。
+  static void SetTraceEnabled(bool enabled);
 
   wxb::DockEdge dock() const { return dock_; }
   bool hidden() const { return phase_ == Phase::kHidden; }
@@ -126,7 +139,8 @@ class EdgeDock {
   void RefreshNormalGeometry();
   /// 别人全屏时把藏起来的窗口彻底 SW_HIDE，别在人家屏幕上留一条 4px 的亮线。
   void SetSuppressed(bool suppressed);
-  bool ForegroundCoversWorkArea() const;
+  /// 前台窗口是不是**真全屏**（整块显示器都被盖住）。
+  bool ForegroundIsFullscreen() const;
   wxb::Rect VisibleRest() const;
   RECT HiddenRect() const;
   bool CanAutoHide();
@@ -163,6 +177,12 @@ class EdgeDock {
   ///  * 顺位继承（上一个前台被关掉 / 最小化）→ 那个 HWND 已经没了或已最小化
   ///    → 什么都不做（见 [OnActivated]）。
   HWND last_foreground_ = nullptr;
+
+  /// 这次前台是系统「顺位」塞给我们的，不是用户想用这个窗口。
+  ///
+  /// 有它才能两头都对：顺位激活既不弹面板，也不让"前台"这条规则把窗口钉住
+  /// （否则悬停弹出来之后就收不回去了）。
+  bool accidental_focus_ = false;
 
   RECT anim_from_{};
   RECT anim_to_{};
