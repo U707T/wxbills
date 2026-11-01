@@ -27,6 +27,7 @@ class EdgeDock {
     int tolerance = 8;          // 离工作区顶边多少逻辑像素算贴上
     int peek = 4;               // 藏起来后露出的条高
     int strip_margin = 3;       // 露出条两侧的热区容差
+    int dwell_ms = 200;         // 鼠标在条上停多久才算「要唤出」（防路过）
     int leave_delay_ms = 180;   // 鼠标离开多久后开始收（防"路过"，但别拖沓）
     int animation_ms = 150;     // 滑动时长（收起用 ease-in、弹回用 ease-out）
     int idle_tick_ms = 80;      // 贴顶但没收起时的轮询间隔
@@ -62,6 +63,12 @@ class EdgeDock {
   /// 直接最大化窗口，用户根本没法用"拖到顶边"这个手势（左右边更糟——会被
   /// 变成半屏贴靠）。所以贴顶是**点一下**完成的，不依赖拖拽。
   void SnapToTop();
+
+  /// 窗口被激活（点任务栏图标 / Alt+Tab / 点了面板本身）：完整露出来。
+  ///
+  /// 和 [ShowNow] 的唯一区别是**会滑出来**：从任务栏点回来时硬跳一下，
+  /// 看起来就是"窗口闪了一下"，而且紧接着还会被当成"鼠标已离开"收回去。
+  void Reveal();
 
   /// 立刻复位到"露出"状态：Alt+Tab、点任务栏图标、关窗口之前都要调。
   void ShowNow();
@@ -137,6 +144,10 @@ class EdgeDock {
   UINT_PTR idle_timer_ = 0;
   UINT_PTR leave_timer_ = 0;
   UINT_PTR anim_timer_ = 0;
+
+  /// 鼠标开始停在「露出条」上的时刻（GetTickCount）。0 表示当前不在条上。
+  /// 见 `Params::dwell_ms`：只在条上**停够时间**才算唤出，路过不算。
+  DWORD strip_since_ = 0;
 
   RECT anim_from_{};
   RECT anim_to_{};

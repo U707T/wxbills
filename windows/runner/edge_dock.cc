@@ -40,6 +40,7 @@ void EdgeDock::Attach(HWND hwnd, bool enabled) {
   enabled_ = enabled;
   phase_ = Phase::kNormal;
   topmost_ = false;
+  strip_since_ = 0;
   SyncFromWindow();
   if (enabled_) StartIdleTimer();
 }
@@ -49,12 +50,14 @@ void EdgeDock::Detach() {
   hwnd_ = nullptr;
   phase_ = Phase::kNormal;
   topmost_ = false;
+  strip_since_ = 0;
   dock_ = wxb::DockEdge::kNone;
 }
 
 void EdgeDock::SetEnabled(bool enabled) {
   if (enabled_ == enabled) return;
   enabled_ = enabled;
+  strip_since_ = 0;
   if (!enabled_) {
     // 关掉时先把窗口放回来：否则窗口停在屏幕外，用户只能从任务栏把它"还原"
     ShowNow();
@@ -106,6 +109,7 @@ void EdgeDock::SnapToTop() {
   rest_ = ToRect(r);
   dock_ = wxb::DockEdge::kTop;
   phase_ = Phase::kNormal;
+  strip_since_ = 0;
 
   if (suppressed_) {
     suppressed_ = false;
@@ -143,6 +147,7 @@ void EdgeDock::ShowNow() {
   if (hwnd_ == nullptr) return;
   if (phase_ == Phase::kNormal && !animating() && !suppressed_) return;
   StopAllTimers();
+  strip_since_ = 0;
   if (suppressed_) {
     // 被全屏挤走的那次：先让窗口重新可见，否则 move 一个隐藏窗口什么也看不见
     suppressed_ = false;
@@ -156,6 +161,33 @@ void EdgeDock::ShowNow() {
   phase_ = Phase::kNormal;
   MoveTo(rest_);
   if (enabled_) StartIdleTimer();
+}
+
+void EdgeDock::Reveal() {
+  if (hwnd_ == nullptr) return;
+  // 正在拖 / 拉伸窗口：位置是用户的手指说了算，这里一动就变成"拽回去"
+  if (in_size_move_) return;
+  StopTimer(&leave_timer_);
+  strip_since_ = 0;
+  if (suppressed_) {
+    // 被全屏应用挤走的那次：先恢复可见并按隐藏位置摆好，再滑出来
+    suppressed_ = false;
+    ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
+    MoveTo(HiddenRect());
+  }
+  // 藏着 / 正在收 / 正在弹：都走动画，别硬跳（硬跳就是"闪一下"）
+  if (phase_ == Phase::kHidden || animating()) {
+    BeginShow();
+    return;
+  }
+  if (topmost_) {
+    SetWindowPos(hwnd_, HWND_NOTOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    topmost_ = false;
+  }
+  phase_ = Phase::kNormal;
+  MoveTo(rest_);
+  RestartIdleTimer();
 }
 
 // ---------------------------------------------------------------- 几何
@@ -294,6 +326,13 @@ bool EdgeDock::CanAutoHide() {
   if (IsIconic(hwnd_) || IsZoomed(hwnd_)) return false;
   if (!IsWindowVisible(hwnd_)) return false;
   if (ForegroundIsOwnDialog()) return false;
+  // 窗口自己就是前台窗口：用户正在用它，这时候收起来等于"点一下就没"。
+  //
+  // 之前没有这一条，于是「从任务栏点回来 / 点了一下面板」之后，只要鼠标不在
+  // 窗口上（点任务栏时本来就不在），180ms 后就又缩回去 —— 用户看到的就是
+  // "刚弹出来就收起"。现在改成：只要这个窗口还拿着前台，就先不收；
+  // 点了别的窗口（失活）之后，鼠标不在上面就照常收。
+  if (GetForegroundWindow() == hwnd_) return false;
   return true;
 }
 
@@ -397,7 +436,21 @@ void EdgeDock::OnIdleTick() {
     case Phase::kHidden:
       // 别人全屏时连那条边也躲起来；恢复后自动回来
       SetSuppressed(ForegroundCoversWorkArea());
-      if (!suppressed_ && CursorOnStrip(pt)) BeginShow();
+      // 唤出要"停一下"才算数：鼠标只是路过屏幕顶边（去点别的窗口的标题栏、
+      // 浏览器标签页）时不该把面板拽出来 —— 拽出来之后鼠标一离开又收起，
+      // 在用户眼里就是"窗口莫名闪了一下"。
+      if (!suppressed_ && CursorOnStrip(pt)) {
+        const DWORD now = GetTickCount();
+        if (strip_since_ == 0) {
+          strip_since_ = now;
+        } else if (now - strip_since_ >=
+                   static_cast<DWORD>(params_.dwell_ms)) {
+          strip_since_ = 0;
+          BeginShow();
+        }
+      } else {
+        strip_since_ = 0;
+      }
       break;
     case Phase::kLeaving:
     case Phase::kHiding:
@@ -440,6 +493,7 @@ void EdgeDock::BeginHide() {
 void EdgeDock::FinishHide() {
   StopTimer(&anim_timer_);
   phase_ = Phase::kHidden;
+  strip_since_ = 0;
   MoveTo(anim_to_);  // 消掉最后不足一像素的误差
   // 置顶：那 4px 的条必须能被点到，否则"唤出"只能靠任务栏图标
   SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0,
@@ -452,6 +506,7 @@ void EdgeDock::FinishHide() {
 void EdgeDock::BeginShow() {
   if (hwnd_ == nullptr) return;
   phase_ = Phase::kShowing;
+  strip_since_ = 0;
   RECT current{};
   anim_from_ = GetWindowRect(hwnd_, &current) ? current : anim_to_;
   anim_to_ = rest_;

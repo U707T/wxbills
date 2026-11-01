@@ -216,13 +216,19 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
       // 拖完就存：下一次启动直接到位，也避免关机时来不及保存
       PersistWindowState();
       break;
-    case WM_ACTIVATE:
-      // Alt+Tab、点任务栏图标：隐藏中的窗口必须立刻放出来，
-      // 否则会"点了图标什么都不发生"。
-      if (dock_ && LOWORD(wparam) != WA_INACTIVE) {
-        dock_->ShowNow();
+    case WM_ACTIVATE: {
+      if (LOWORD(wparam) != WA_INACTIVE) {
+        // 被激活（点任务栏图标 / Alt+Tab / 点了面板）：滑出来。
+        // 用 Reveal 而不是硬跳 —— 硬跳那一下在用户眼里就是"闪了一下"。
+        if (dock_) dock_->Reveal();
+        break;  // 继续交给基类，它会把焦点发给 Flutter 视图
       }
-      break;
+      // 失活时不落到基类：基类在 WM_ACTIVATE 里是**无条件** SetFocus —— 对一个
+      // 正在失去激活的窗口再抢一次焦点，等于跟系统正在做的焦点切换打架：
+      // 一旦被拽回前台就会又来一次 WA_ACTIVE、面板滑出来；鼠标又不在上面，
+      // 很快又收起。用户看到的就是「每次切到别的窗口，这个窗口都闪一下再收起」。
+      return 0;
+    }
     case WM_CLOSE:
       PersistWindowState();
       break;
