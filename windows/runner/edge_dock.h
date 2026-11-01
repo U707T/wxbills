@@ -70,6 +70,13 @@ class EdgeDock {
   /// 看起来就是"窗口闪了一下"，而且紧接着还会被当成"鼠标已离开"收回去。
   void Reveal();
 
+  /// `WM_ACTIVATE(WA_ACTIVE)`：要不要露出来，由这里决定。
+  ///
+  /// 不能无脑 [Reveal]：别的窗口被关掉 / 最小化时，系统会把激活顺位交给
+  /// 我们（面板是可见窗口里的下一个），那不是用户想用这个窗口 ——
+  /// 表现出来就是"关别人的窗口，这个窗口莫名弹出来又收回去"。
+  void OnActivated();
+
   /// 立刻复位到"露出"状态：Alt+Tab、点任务栏图标、关窗口之前都要调。
   void ShowNow();
 
@@ -148,6 +155,14 @@ class EdgeDock {
   /// 鼠标开始停在「露出条」上的时刻（GetTickCount）。0 表示当前不在条上。
   /// 见 `Params::dwell_ms`：只在条上**停够时间**才算唤出，路过不算。
   DWORD strip_since_ = 0;
+
+  /// 上一次轮询时看到的「别的窗口」的前台 HWND。
+  ///
+  /// 用来区分两种 `WM_ACTIVATE`：
+  ///  * 用户主动（点任务栏图标 / Alt+Tab）→ 上一个前台还好好活着 → 露出来；
+  ///  * 顺位继承（上一个前台被关掉 / 最小化）→ 那个 HWND 已经没了或已最小化
+  ///    → 什么都不做（见 [OnActivated]）。
+  HWND last_foreground_ = nullptr;
 
   RECT anim_from_{};
   RECT anim_to_{};

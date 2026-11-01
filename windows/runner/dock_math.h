@@ -133,6 +133,22 @@ inline bool CoversWorkArea(const Rect& window, const Rect& work) {
          window.right >= work.right && window.bottom >= work.bottom;
 }
 
+/// 这次「被激活」是不是系统**顺位继承**来的？
+///
+/// 别的窗口被关掉 / 最小化之后，Windows 会把前台交给 Z 序里的下一个可见窗口。
+/// 贴边隐藏的面板虽然露在屏幕外，但它是 `WS_VISIBLE` 的，所以经常就是那个
+/// "下一个" —— 于是用户明明是在关别人的窗口，这个面板却冒出来，过一会儿
+/// （点了别的窗口、鼠标又不在上面）再自己收回去。
+///
+/// 参数全是调用方从 Win32 现查的，这里只做判断，方便在 dock_math_test 里
+/// 把四种组合都跑一遍。
+inline bool IsInheritedActivation(bool has_previous, bool previous_alive,
+                                  bool previous_minimized,
+                                  bool previous_visible) {
+  if (!has_previous) return false;  // 没记到上一个前台：按"用户主动"处理
+  return !previous_alive || previous_minimized || !previous_visible;
+}
+
 /// 缓动：二次曲线。**收起和弹回用的不是同一条**：
 ///  * 收起（accelerate）用 ease-in —— 先慢后快，像被吸走；
 ///  * 弹回（decelerate）用 ease-out —— 先快后慢，稳稳停住。

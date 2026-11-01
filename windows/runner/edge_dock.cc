@@ -41,6 +41,7 @@ void EdgeDock::Attach(HWND hwnd, bool enabled) {
   phase_ = Phase::kNormal;
   topmost_ = false;
   strip_since_ = 0;
+  last_foreground_ = nullptr;
   SyncFromWindow();
   if (enabled_) StartIdleTimer();
 }
@@ -51,6 +52,7 @@ void EdgeDock::Detach() {
   phase_ = Phase::kNormal;
   topmost_ = false;
   strip_since_ = 0;
+  last_foreground_ = nullptr;
   dock_ = wxb::DockEdge::kNone;
 }
 
@@ -188,6 +190,32 @@ void EdgeDock::Reveal() {
   phase_ = Phase::kNormal;
   MoveTo(rest_);
   RestartIdleTimer();
+}
+
+void EdgeDock::OnActivated() {
+  if (hwnd_ == nullptr) return;
+
+  // 这次激活是系统「顺位」给的，不是用户想用这个窗口：
+  // 别的窗口被关掉 / 最小化后，前台会交给 Z 序里的下一个可见窗口，
+  // 而藏在屏幕外的面板正好是 `WS_VISIBLE` 的 —— 于是"关别人的窗口，
+  // 这个窗口莫名弹出来，过一会儿又莫名收回去"。
+  const HWND prev = last_foreground_;
+  const bool has_previous = prev != nullptr && prev != hwnd_;
+  bool alive = false;
+  bool minimized = false;
+  bool visible = false;
+  if (has_previous) {
+    alive = IsWindow(prev) != FALSE;
+    if (alive) {
+      minimized = IsIconic(prev) != FALSE;
+      visible = IsWindowVisible(prev) != FALSE;
+    }
+  }
+  if (wxb::IsInheritedActivation(has_previous, alive, minimized, visible)) {
+    return;
+  }
+
+  Reveal();
 }
 
 // ---------------------------------------------------------------- 几何
@@ -419,6 +447,12 @@ void EdgeDock::OnIdleTick() {
   if (!GetCursorPos(&pt)) return;
   // 每个 tick 刷一次工作区：显示器热插拔、任务栏自动隐藏都不一定发消息
   UpdateWorkArea();
+
+  // 记下"现在谁在前台"（只要不是我们自己）：下一次收到 WM_ACTIVATE 时，
+  // 靠它判断这次激活是用户主动的、还是别人关窗口/最小化后顺位继承来的。
+  // 我们被激活之后这里不会再覆盖（fg 就是我们自己），所以判据不会被冲掉。
+  const HWND fg = GetForegroundWindow();
+  if (fg != nullptr && fg != hwnd_) last_foreground_ = fg;
 
   switch (phase_) {
     case Phase::kNormal:

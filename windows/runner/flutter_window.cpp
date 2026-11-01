@@ -218,9 +218,9 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
       break;
     case WM_ACTIVATE: {
       if (LOWORD(wparam) != WA_INACTIVE) {
-        // 被激活（点任务栏图标 / Alt+Tab / 点了面板）：滑出来。
-        // 用 Reveal 而不是硬跳 —— 硬跳那一下在用户眼里就是"闪了一下"。
-        if (dock_) dock_->Reveal();
+        // 被激活：不一定真的要露出来 —— 别人关窗口/最小化时系统会把激活
+        // 顺位交给我们，那种"继承来的激活"什么都不该发生（见 OnActivated）。
+        if (dock_) dock_->OnActivated();
         break;  // 继续交给基类，它会把焦点发给 Flutter 视图
       }
       // 失活时不落到基类：基类在 WM_ACTIVATE 里是**无条件** SetFocus —— 对一个

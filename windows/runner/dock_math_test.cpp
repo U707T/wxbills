@@ -170,6 +170,26 @@ void TestEase() {
   }
 }
 
+void TestInheritedActivation() {
+  // 没记到上一个前台窗口：按"用户主动"处理（宁可露出，也别点了任务栏没反应）
+  CHECK(!wxb::IsInheritedActivation(false, false, false, false));
+
+  // 上一个前台还好好活着 → 用户主动（点任务栏图标 / Alt+Tab）
+  CHECK(!wxb::IsInheritedActivation(true, true, false, true));
+
+  // 上一个前台被关掉了 → 顺位继承（"关别人的窗口，这个窗口冒出来"的根因）
+  CHECK(wxb::IsInheritedActivation(true, false, false, false));
+
+  // 上一个前台被最小化了 → 顺位继承
+  CHECK(wxb::IsInheritedActivation(true, true, true, true));
+
+  // 上一个前台被隐藏了（关到托盘）→ 顺位继承
+  CHECK(wxb::IsInheritedActivation(true, true, false, false));
+
+  // 窗口还在但已经不可见：同样不算用户主动
+  CHECK(wxb::IsInheritedActivation(true, true, false, false));
+}
+
 }  // namespace
 
 int main() {
@@ -178,6 +198,7 @@ int main() {
   TestPeekStrip();
   TestClampToWork();
   TestCoversWorkArea();
+  TestInheritedActivation();
   TestEase();
 
   std::printf("%d checks, %d failed\n", g_checks, g_failed);
