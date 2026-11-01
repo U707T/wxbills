@@ -192,17 +192,58 @@ void TestInheritedActivation() {
 
 void TestSuppressStrip() {
   // 普通窗口 / 最大化窗口（只盖工作区，任务栏还在）→ 条要留着
-  CHECK(!wxb::ShouldSuppressStrip(true, false, false, false, false));
+  CHECK(!wxb::ShouldSuppressStrip(true, false, false, false, false, false));
   // 任务栏设成"自动隐藏"时，最大化窗口会盖满整块屏幕 —— 但它不是全屏内容
-  CHECK(!wxb::ShouldSuppressStrip(true, false, false, true, true));
+  CHECK(!wxb::ShouldSuppressStrip(true, false, false, false, true, true));
   // 真全屏（整块显示器都盖住、且不是最大化）→ 躲起来
-  CHECK(wxb::ShouldSuppressStrip(true, false, false, false, true));
+  CHECK(wxb::ShouldSuppressStrip(true, false, false, false, false, true));
   // 我们自己的窗口（面板 / 对话框）：不算别人全屏
-  CHECK(!wxb::ShouldSuppressStrip(true, true, false, false, true));
-  // 桌面：矩形就是整块屏幕，但它不是"内容"，点一下桌面不该让条消失
-  CHECK(!wxb::ShouldSuppressStrip(true, false, true, false, true));
+  CHECK(!wxb::ShouldSuppressStrip(true, true, false, false, false, true));
   // 没有前台窗口
-  CHECK(!wxb::ShouldSuppressStrip(false, false, false, false, false));
+  CHECK(!wxb::ShouldSuppressStrip(false, false, false, false, false, false));
+
+  // ---- v2.3.8：桌面 / 任务栏这类"系统表面"不算全屏内容 ----
+  //
+  // 这是用户报的「贴边状态下，别的程序一最小化，wxbill 也跟着最小化」的根因：
+  // 最小化会把前台顺位交给桌面（Progman / **WorkerW**）或任务栏，它们的窗口
+  // 矩形**就是整块显示器**，旧判据（只比对 GetShellWindow()）认不出 WorkerW，
+  // 于是"别人全屏"成立 → 条被挪到 -32000 → 屏幕上连 4px 都没了。
+  CHECK(!wxb::ShouldSuppressStrip(true, false, true, false, false, true));
+  // 最大化 / 最小化的窗口同理（两者都可能是整块屏幕的矩形）
+  CHECK(!wxb::ShouldSuppressStrip(true, false, false, true, false, true));
+  // 既不是壳、也不是休眠窗口、又盖满屏 —— 这才是真的全屏游戏 / 视频
+  CHECK(wxb::ShouldSuppressStrip(true, false, false, false, false, true));
+
+  // ---- v2.3.8：休眠窗口（最小化 / 被 DWM 隐身 / 不可见）不算全屏 ----
+  //
+  // 最要命的一步：一个**最大化**的窗口被最小化之后，`IsZoomed()` 立刻变 false，
+  // 但 `GetWindowRect()` 还是那块整屏矩形。于是"刚点完最小化"的那一瞬间，
+  // 前台窗口在旧判据眼里正好是"一个盖满屏幕、又不是最大化的窗口" = 全屏内容。
+  CHECK(!wxb::ShouldSuppressStrip(true, false, false, true, false, true));
+  // 被 DWM 隐身（UWP 挂起 / 别的虚拟桌面）也走这一条
+  CHECK(!wxb::ShouldSuppressStrip(true, false, false, true, false, true));
+}
+
+void TestShellSurfaceClass() {
+  // 桌面：Win10 1803+ 上激活常常落在这两个身上，GetShellWindow() 只给 Progman
+  CHECK(wxb::IsShellSurfaceClass(L"Progman"));
+  CHECK(wxb::IsShellSurfaceClass(L"WorkerW"));
+  CHECK(wxb::IsShellSurfaceClass(L"SHELLDLL_DefView"));
+  // 任务栏（主 / 副屏）、托盘溢出、任务栏缩略图预览
+  CHECK(wxb::IsShellSurfaceClass(L"Shell_TrayWnd"));
+  CHECK(wxb::IsShellSurfaceClass(L"Shell_SecondaryTrayWnd"));
+  CHECK(wxb::IsShellSurfaceClass(L"NotifyIconOverflowWindow"));
+  CHECK(wxb::IsShellSurfaceClass(L"TaskListThumbnailWnd"));
+
+  // 普通窗口类不能被误伤：误伤一次就等于"这个程序一在前台，条就消失"
+  CHECK(!wxb::IsShellSurfaceClass(L"Chrome_WidgetWin_1"));
+  CHECK(!wxb::IsShellSurfaceClass(L"Notepad"));
+  CHECK(!wxb::IsShellSurfaceClass(L""));
+  CHECK(!wxb::IsShellSurfaceClass(nullptr));
+  // 只做**整名**比较：`Shell_TrayWnd2` 这种不是任务栏（宁可多认一个普通窗口，
+  // 也不要因为前缀匹配把整屏窗口全当成任务栏）
+  CHECK(!wxb::IsShellSurfaceClass(L"Shell_TrayWndX"));
+  CHECK(!wxb::IsShellSurfaceClass(L"Worker"));
 }
 
 void TestCanAutoHide() {
@@ -303,6 +344,7 @@ int main() {
   TestCoversWorkArea();
   TestInheritedActivation();
   TestSuppressStrip();
+  TestShellSurfaceClass();
   TestCanAutoHide();
   TestSnapRevealCycle();
   TestEase();

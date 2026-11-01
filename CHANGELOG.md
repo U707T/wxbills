@@ -1,5 +1,86 @@
 # 更新日志
 
+## v2.3.8
+
+> 用户报的一条小 bug：**开着自动贴边、处于贴边状态时，别的程序点最小化，
+> wxbill 也跟着"最小化"了。**
+>
+> 排查下来是一处**误判**：别的最小化之后 Windows 把前台顺位交给桌面/任务栏，
+> 而 `ForegroundIsFullscreen()` 认不出它们（只比对 `GetShellWindow()` =
+> `Progman`），于是"别人全屏"成立 → 那 4px 的条被挪到 `-32000` →
+> 屏幕上什么都没有了，只剩任务栏按钮。
+
+### 根因链
+
+1. 用户最小化别的程序 → 我们是 `WS_VISIBLE` + 置顶的隐藏面板，正是 Z 序里
+   的"下一个" → 收到 `WM_ACTIVATE`（顺位继承）。
+2. 2.3.7 的处理是"不弹面板 + 把前台还给桌面"（`SetForegroundWindow(GetShellWindow())`）。
+3. 前台从此落在 **桌面** 或 **任务栏** 上。它们的窗口矩形**就是整块显示器**。
+4. 隐藏状态下每 40ms 跑一次 `ForegroundIsFullscreen()`，判据是
+   `is_desktop = (fg == GetShellWindow()) || (fg == GetDesktopWindow())`：
+   * Win10 1803+ / Win11 的桌面常常是 **`WorkerW`**，不是 `Progman` → 漏判；
+   * 任务栏设成"自动隐藏"时前台会是 `Shell_TrayWnd` → 也漏判。
+5. 于是 `CoversWorkArea()` 成立 → `SetSuppressed(true)` → 条被整块挪到
+   `-32000`。**这就是用户看到的"它也最小化了"**，而且悬停唤出彻底失效
+   （只剩任务栏按钮能救回来）。
+
+### 审计结论（6 处缺陷）
+
+| # | 缺陷 | 表现 |
+|---|------|------|
+| 1 | `is_desktop` 只认 `GetShellWindow()` / `GetDesktopWindow()`，认不出 `WorkerW`、`Shell_TrayWnd`、`Shell_SecondaryTrayWnd`、托盘溢出 | 别的程序一最小化，条被挪到 `-32000`（本次报的 bug） |
+| 2 | 只挡了"最大化"，没挡"最小化 / 被 DWM 隐身 / 不可见" | 最小化**一个已经最大化的窗口**时，`IsZoomed` 立刻变 false、`GetWindowRect` 还是整屏矩形 → 正好被判成"全屏内容" |
+| 3 | `OnActivated()` 返回 void，调用方无条件 `SetFocus(child_content_)` | 顺位继承的激活照样把键盘焦点交给 Flutter 视图：输入进了一个屏幕外的窗口（点过搜索框的话，列表还会被悄悄过滤） |
+| 4 | `last_foreground_` 只在 idle tick 采样，而离开等待 / 收起动画期间 idle 定时器是停的 | 恰好是"别人最小化"的高发窗口；判据过期 → 真激活被当成继承、或继承被当成真激活 |
+| 5 | `SyncFromWindow()` 在最小化分支 `StopTimer` 后不补采样 | 我们自己被最小化（Win+D / 点任务栏）期间别人关了一堆窗口，从任务栏还原回来第一次激活被判成"继承"，面板叫不出来 |
+| 6 | 顺位继承时"鼠标就在面板上"没有例外 | 刚最小化完 A，鼠标顺手回来点面板 → 被当成继承、前台被抢回桌面，面板弹出却点不动、也打不了字 |
+
+### 修复
+
+- **按类名认"系统壳表面"**：新增 `wxb::IsShellSurfaceClass()`
+  （`Progman` / `WorkerW` / `SHELLDLL_DefView` / `Shell_TrayWnd` /
+  `Shell_SecondaryTrayWnd` / `NotifyIconOverflowWindow` /
+  `TopLevelWindowForOverflowXamlIsland` / `TaskListThumbnailWnd`），
+  整名比较、不误伤普通窗口。
+- **`ShouldSuppressStrip()` 增加 `is_dormant`**：最小化 / 被 DWM 隐身
+  （`DWMWA_CLOAKED`，UWP 挂起、别的虚拟桌面）/ 不可见的窗口不算"全屏内容"。
+- **`OnActivated()` 返回 bool**（这次激活是不是用户主动的），
+  `flutter_window.cpp` 据此决定要不要把焦点交给 Flutter 视图；顺位继承时
+  直接 `return 0`，不再让基类抢焦点。
+- **`ReleaseForegroundToShell()` 复核**：`SetForegroundWindow` 在前台锁下会
+  静默失败，改成用 `GetForegroundWindow()` 复核后再清 `accidental_focus_`；
+  失败就保留标记，让 `CanAutoHide` 继续按"这不是用户在用"处理。
+- **补采样**：抽出 `TrackForeground()`，在 `OnLeaveTimeout()`（离开等待的
+  180ms）、`OnAnimTick()`（收起/弹回动画）、以及最小化分支里都各采一次。
+- **鼠标在面板上时不算继承**：只对 `kNormal` 放行（藏着时不能让"鼠标压在
+  条上"绕过 200ms dwell，那是 2.3.4 修掉的"闪一下"）。
+- **`ForegroundIsFullscreen()` 少做无用功**：先走便宜的否决（类名 / 最大化），
+  再量矩形，`DWMWA_CLOAKED` 只在"矩形确实盖满屏"时才问 DWM —— 隐藏状态下
+  这个函数每 40ms 跑一次，别在常见路径上做 DWM 往返。
+
+### 测试
+
+- C++ 断言 **116 → 133 条**：
+  - `TestSuppressStrip()` 补齐 `is_dormant` 与壳表面的组合（含"最大化后被
+    最小化"这个最要命的组合）。
+  - 新增 `TestShellSurfaceClass()`（17 条）：8 个壳类名逐个认，外加
+    `Chrome_WidgetWin_1` / 空串 / `nullptr` / `Shell_TrayWndX` 不被误伤
+    （必须是**整名**比较）。
+- `dart analyze` 无问题，`flutter test --no-pub` **113 项全过**。
+- `edge_dock.cc` / `flutter_window.cpp` / `main.cpp` 用最小 Win32 + Flutter 桩
+  头文件按 `-Wall -Wextra` 过了语法检查（**不是链接验证**，真机构建仍需 CI）。
+
+### 待真机验证
+
+沙箱里没有 Windows（也没有 `/dev/kvm` 起虚拟机），下面三步需要在真机复现：
+
+1. 贴顶 → 让面板收成 4px → 点任意程序的最小化按钮 → **条应该还在屏幕顶部**，
+   鼠标碰一下能弹回来（`--edge-trace` 日志里不该出现 `suppress 1`）。
+2. 把某个窗口最大化后再最小化 → 同样不该出现 `suppress 1`。
+3. 任务栏设为"自动隐藏"后重复第 1 步。
+4. 真全屏（视频 / 游戏）仍然要躲：`suppress 1`，退出全屏后 `suppress 0` 且
+   条自己回来。
+
 ## v2.3.7
 
 > 2.3.6 把「藏条」的判据修对了，但没检查它落地时**到底有没有生效**：

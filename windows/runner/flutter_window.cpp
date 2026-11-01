@@ -236,7 +236,12 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
       if (LOWORD(wparam) != WA_INACTIVE) {
         // 被激活：不一定真的要露出来 —— 别人关窗口/最小化时系统会把激活
         // 顺位交给我们，那种"继承来的激活"什么都不该发生（见 OnActivated）。
-        if (dock_) dock_->OnActivated();
+        //
+        // 返回值还要决定**要不要把焦点交给 Flutter 视图**：顺位继承时窗口
+        // 可能整块藏在屏幕外，这时候再 SetFocus 就等于把用户的键盘输入
+        // 拐进一个看不见的窗口（点过搜索框的话，列表还会被悄悄过滤）。
+        const bool user_initiated = dock_ != nullptr && dock_->OnActivated();
+        if (dock_ != nullptr && !user_initiated) return 0;
         break;  // 继续交给基类，它会把焦点发给 Flutter 视图
       }
       // 失活时不落到基类：基类在 WM_ACTIVATE 里是**无条件** SetFocus —— 对一个

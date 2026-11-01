@@ -79,7 +79,11 @@ class EdgeDock {
   /// 不能无脑 [Reveal]：别的窗口被关掉 / 最小化时，系统会把激活顺位交给
   /// 我们（面板是可见窗口里的下一个），那不是用户想用这个窗口 ——
   /// 表现出来就是"关别人的窗口，这个窗口莫名弹出来又收回去"。
-  void OnActivated();
+  ///
+  /// 返回值：这次激活是不是**用户主动**的。false 时调用方不该把焦点交给
+  /// Flutter 视图 —— 顺位继承来的激活本来就要立刻还回去，再抢一次焦点等于
+  /// 把键盘输入拐进一个藏在屏幕外的窗口。
+  bool OnActivated();
 
   /// `WM_ACTIVATE(WA_INACTIVE)`：失活时把"被动接管的前台"这个标记清掉。
   ///
@@ -166,6 +170,10 @@ class EdgeDock {
   bool CursorOnWindow(POINT pt) const;
   bool CursorOnStrip(POINT pt) const;
   bool ForegroundIsOwnDialog() const;
+  /// 顺位继承来的激活一律把前台还回去（见 [OnActivated]）。
+  void ReleaseForegroundToShell();
+  /// 采样「现在谁在前台」，供 [IsInheritedActivation] 判断下次激活的来源。
+  void TrackForeground();
 
   HWND hwnd_ = nullptr;
   Params params_;

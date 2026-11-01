@@ -1,6 +1,8 @@
 #ifndef RUNNER_DOCK_MATH_H_
 #define RUNNER_DOCK_MATH_H_
 
+#include <wchar.h>  // wcscmp：壳表面类名比较用（不引入 windows.h，测试文件在 Linux 上也编得过）
+
 // 贴边隐藏的**纯几何**部分：只依赖整数运算，不 include windows.h、不碰窗口句柄。
 //
 // 为什么要单独拆出来：这段逻辑决定了「窗口算不算贴边」「藏到哪」「鼠标碰到哪一块
@@ -139,6 +141,38 @@ inline bool CoversWorkArea(const Rect& window, const Rect& work) {
          window.right >= work.right && window.bottom >= work.bottom;
 }
 
+/// 这个窗口类名属于「系统壳表面」吗（桌面 / 任务栏 / 托盘溢出 / 任务栏预览）？
+///
+/// 这些窗口的矩形经常**就是整块显示器**，但它们不是"用户的全屏内容"：
+///  * 任务栏设成"自动隐藏"时，`Shell_TrayWnd` 必须覆盖整块屏幕才能接住
+///    鼠标（否则贴着屏幕下沿的那一下永远悬停不到）；
+///  * Win10 1803+ / Win11 的桌面被拆成 `Progman` + `WorkerW`：`GetShellWindow()`
+///    返回的是 `Progman`，而激活真正落到的是 `WorkerW`（还带着
+///    `SHELLDLL_DefView`）。只比对 `GetShellWindow()` 会漏掉后者。
+///
+/// 为什么要单独认类名而不是"矩形够大就算"：见 [ShouldSuppressStrip] —— 误判
+/// 一次，藏起来的那条 4px 就被挪到屏幕外（`SetSuppressed`），用户看到的是
+/// "别的程序一最小化，面板也跟着没了"，而且鼠标再也唤不出来。
+///
+/// 这里只做纯字符串比较，不 include windows.h，测试文件能直接跑。
+inline bool IsShellSurfaceClass(const wchar_t* class_name) {
+  if (class_name == nullptr) return false;
+  static const wchar_t* const kNames[] = {
+      L"Progman",                             // 桌面（Win10/11 的一部分）
+      L"WorkerW",                             // 桌面（壁纸 / 图标层）
+      L"SHELLDLL_DefView",                    // 桌面图标层
+      L"Shell_TrayWnd",                       // 主任务栏
+      L"Shell_SecondaryTrayWnd",              // 副屏任务栏
+      L"NotifyIconOverflowWindow",            // 托盘溢出面板
+      L"TopLevelWindowForOverflowXamlIsland",  // Win11 的托盘溢出（XAML）
+      L"TaskListThumbnailWnd",                // 任务栏缩略图预览
+  };
+  for (const wchar_t* name : kNames) {
+    if (wcscmp(name, class_name) == 0) return true;
+  }
+  return false;
+}
+
 /// 这次「被激活」是不是系统**顺位继承**来的？
 ///
 /// 别的窗口被关掉 / 最小化之后，Windows 会把前台交给 Z 序里的下一个可见窗口。
@@ -160,19 +194,26 @@ inline bool IsInheritedActivation(bool has_previous, bool previous_alive,
 /// 只有**真全屏**才躲：整块显示器都被别的窗口盖住（游戏 / 全屏视频），
 /// 那种场景下面板上多一条亮边确实很碍眼。
 ///
-/// **最大化窗口不算**，哪怕它盖满了整块屏幕（任务栏设成"自动隐藏"时就会
-/// 这样）。这是这条规则最要紧的一次修正：最大化是用户日常最常见的状态，
-/// 早先按"盖住工作区"判断，于是最大化窗口一在前台，条就被 `SW_HIDE`；
-/// `SW_HIDE` 的窗口连任务栏按钮一起消失，用户就再也叫不出面板了
-/// （表现为"收起之后无法触发"）。
+/// 否决条件全是踩出来的，每一条都对应一次"面板自己消失 / 自己冒出来"：
+///
+///  * `is_shell_surface`（桌面 / 任务栏 / 托盘 / 任务栏预览）：它们的矩形
+///    经常等于整块显示器。**这是最常见的一次误判**：用户只是最小化了别的
+///    程序，前台顺位落到桌面（`WorkerW`）或任务栏，条就被挪到屏幕外 ——
+///    看起来正是"别的程序最小化，它也最小化了"。判据见
+///    [IsShellSurfaceClass]。
+///  * `is_maximized`：任务栏设成"自动隐藏"时，最大化窗口也会盖满整块屏幕，
+///    但它是用户日常最常见的状态，不是"全屏内容"。
+///  * `is_dormant`（最小化 / 被 DWM 隐身（cloaked，UWP 挂起、别的虚拟桌面）/
+///    不可见）：这些窗口的 `GetWindowRect` 还停在"还原后"的矩形上，拿它判
+///    "盖住整块屏"必然误判 —— 而且它们此刻根本没在屏幕上放着任何内容。
 ///
 /// [covers_monitor] 必须是「盖住**我们这块**显示器」：副屏放全屏视频时，
 /// 主屏的条不该跟着躲——条一躲，那块屏上的面板就没了唤出入口。
 inline bool ShouldSuppressStrip(bool has_foreground, bool same_process,
-                                bool is_desktop, bool is_maximized,
-                                bool covers_monitor) {
-  if (!has_foreground || same_process || is_desktop) return false;
-  if (is_maximized) return false;
+                                bool is_shell_surface, bool is_dormant,
+                                bool is_maximized, bool covers_monitor) {
+  if (!has_foreground || same_process || is_shell_surface) return false;
+  if (is_dormant || is_maximized) return false;
   return covers_monitor;
 }
 

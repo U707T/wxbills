@@ -12,6 +12,10 @@ namespace {
 #ifndef DWMWA_EXTENDED_FRAME_BOUNDS
 #define DWMWA_EXTENDED_FRAME_BOUNDS 9
 #endif
+// 同理：Win8 起才有，SDK 8.0 之前的头文件里没有
+#ifndef DWMWA_CLOAKED
+#define DWMWA_CLOAKED 14
+#endif
 
 wxb::Rect ToWxb(const RECT& r) {
   return wxb::Rect{r.left, r.top, r.right, r.bottom};
@@ -81,6 +85,26 @@ void Trace(const char* event, int a = 0, int b = 0) {
   line += " b=";
   line += std::to_string(b);
   AppendTraceLine(line);
+}
+
+// 前台窗口的类名（用于认出桌面 / 任务栏这类"系统表面"）。
+// 取不到就当空串：宁可当普通窗口，也不要凭猜测把条藏掉。
+std::wstring WindowClassName(HWND hwnd) {
+  wchar_t buffer[128] = {0};
+  const int length = GetClassNameW(hwnd, buffer, 128);
+  if (length <= 0) return std::wstring();
+  return std::wstring(buffer, static_cast<size_t>(length));
+}
+
+// 被 DWM 隐身（cloaked）的窗口：UWP 挂起、别的虚拟桌面、锁屏之后的窗口。
+// 它们的 `IsWindowVisible` 仍然是 TRUE、`GetWindowRect` 还是原来那套矩形，
+// 唯独屏幕上根本没有它们 —— 拿这种窗口判"别人全屏"必然误判。
+// `DWMWA_CLOAKED` 是 Win8 之后才有的，老 SDK 里没有枚举值，自己补一个。
+bool IsWindowCloaked(HWND hwnd) {
+  BOOL cloaked = FALSE;
+  const HRESULT hr =
+      DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
+  return SUCCEEDED(hr) && cloaked != FALSE;
 }
 
 }  // namespace
@@ -199,22 +223,34 @@ bool EdgeDock::SnapToTop() {
 bool EdgeDock::ForegroundIsFullscreen() const {
   const HWND foreground = GetForegroundWindow();
   if (foreground == nullptr || foreground == hwnd_) {
-    return wxb::ShouldSuppressStrip(false, false, false, false, false);
+    return wxb::ShouldSuppressStrip(false, false, false, false, false, false);
   }
   DWORD pid = 0;
   GetWindowThreadProcessId(foreground, &pid);
   const bool same_process = pid == GetCurrentProcessId();
-  // 桌面（Progman / WorkerW）的矩形就是整块屏幕，但它不是"内容"：
-  // 点一下桌面把条藏起来只会让人以为功能坏了。
-  const bool is_desktop = foreground == GetShellWindow() ||
-                          foreground == GetDesktopWindow();
+  // 桌面（Progman / WorkerW / SHELLDLL_DefView）、任务栏 / 托盘 / 任务栏预览
+  // 的矩形经常**就是整块显示器**，但它们不是"内容"。
+  //
+  // 这里是"别的程序一最小化，面板也消失了"的根因：最小化会把前台顺位交给
+  // 桌面或任务栏，而我们只比对 `GetShellWindow()`（= Progman），于是在
+  // WorkerW 桌面上、任务栏自动隐藏时全部漏判 → 条被挪到 -32000 → 屏幕上
+  // 连 4px 都没有，悬停唤出彻底失效。判据现在按**类名**认，见
+  // wxb::IsShellSurfaceClass。
+  const bool is_shell_surface =
+      foreground == GetShellWindow() ||
+      wxb::IsShellSurfaceClass(WindowClassName(foreground).c_str());
   // 最大化窗口：任务栏设成"自动隐藏"时它也会盖满整块屏幕，但它仍然是
   // 普通窗口，不是用户的"全屏内容"。
   const bool is_maximized = IsZoomed(foreground) != FALSE;
+
+  // 先做便宜的否决（类名 / 最大化），再量矩形，最后才问 DWM。
+  // 隐藏状态下这个函数每 40ms 跑一次，别在常见路径上做 DWM 往返。
   bool covers_monitor = false;
-  RECT rect{};
-  if (!same_process && !is_desktop && !is_maximized &&
-      GetWindowRect(foreground, &rect)) {
+  if (!same_process && !is_shell_surface && !is_maximized) {
+    RECT rect{};
+    if (!GetWindowRect(foreground, &rect)) {
+      return wxb::ShouldSuppressStrip(false, false, false, false, false, false);
+    }
     MONITORINFO info{};
     info.cbSize = sizeof(info);
     const HMONITOR monitor =
@@ -228,8 +264,22 @@ bool EdgeDock::ForegroundIsFullscreen() const {
       covers_monitor = wxb::CoversWorkArea(ToWxb(rect), ToWxb(info.rcMonitor));
     }
   }
-  return wxb::ShouldSuppressStrip(true, same_process, is_desktop, is_maximized,
-                                  covers_monitor);
+
+  // 最小化 / 被 DWM 隐身 / 不可见：只有矩形真的盖满屏时才值得追查。
+  //
+  // 这一步不能省，而且**必须放在最后**：一个「最大化 → 被最小化」的窗口，
+  // 在最小化的那一瞬间 `IsZoomed()` 已经变 false，但 `GetWindowRect()` 还是
+  // 那块整屏矩形 —— 旧判据（只挡最大化）正好把它当成"盖满屏幕的全屏窗口"，
+  // 于是条被挪到屏幕外。它此刻屏幕上根本没放任何内容，判据得看"还活不活跃"。
+  bool is_dormant = false;
+  if (covers_monitor) {
+    is_dormant = IsIconic(foreground) != FALSE ||
+                 !IsWindowVisible(foreground) ||
+                 IsWindowCloaked(foreground);
+  }
+
+  return wxb::ShouldSuppressStrip(true, same_process, is_shell_surface,
+                                  is_dormant, is_maximized, covers_monitor);
 }
 
 void EdgeDock::SetSuppressed(bool suppressed) {
@@ -295,13 +345,13 @@ void EdgeDock::Reveal() {
   RestartIdleTimer();
 }
 
-void EdgeDock::OnActivated() {
-  if (hwnd_ == nullptr) return;
+bool EdgeDock::OnActivated() {
+  if (hwnd_ == nullptr) return false;
 
   // 这次激活是系统「顺位」给的，不是用户想用这个窗口：
   // 别的窗口被关掉 / 最小化后，前台会交给 Z 序里的下一个可见窗口，
-  // 而藏在屏幕外的面板正好是 `WS_VISIBLE` 的 —— 于是"关别人的窗口，
-  // 这个窗口莫名弹出来，过一会儿又莫名收回去"。
+  // 而藏在屏幕外的面板正好是 `WS_VISIBLE` 的、还置顶 —— 于是"别的窗口一
+  // 最小化，这个面板就跟着动了"。
   const HWND prev = last_foreground_;
   const bool has_previous = prev != nullptr && prev != hwnd_;
   bool alive = false;
@@ -315,30 +365,63 @@ void EdgeDock::OnActivated() {
     }
   }
   if (wxb::IsInheritedActivation(has_previous, alive, minimized, visible)) {
-    // 顺位继承：不弹面板，但记下"这个前台是白捡的" —— 否则「前台就不收」
-    // 这条规则会把窗口钉住，下次悬停弹出来之后再也收不回去。
-    // 同时把判据清掉：不清的话它会一直指着那个已经关掉的窗口，
-    // 之后用户真的去点任务栏图标也会被当成"继承"，面板永远叫不出来。
-    accidental_focus_ = true;
-    last_foreground_ = nullptr;
-    Trace("activate.inherited", alive ? 1 : 0, minimized ? 1 : 0);
-    // 面板不在"正常露出"状态时（藏着 / 正在收 / 正在弹），这次"白捡的前台"
-    // 会把键盘焦点也一起带走：用户关掉一个窗口之后接着打字，字全进了一个
-    // 看不见的窗口（要是之前点过搜索框，列表还会被悄悄过滤）。
-    // 此刻我们就是前台，把前台还给桌面是允许的。
-    if (phase_ != Phase::kNormal) {
-      const HWND shell = GetShellWindow();
-      const bool released =
-          shell != nullptr && SetForegroundWindow(shell) != FALSE;
-      Trace("activate.inherited.release_focus", released ? 1 : 0);
+    // 唯一例外：面板本来就露着，而且鼠标正压在它上面 —— 那是用户自己点进来的，
+    // 不管上一个前台是什么状态（他可能刚最小化了 A，顺手回来点面板）。
+    //
+    // 只对 kNormal 放行：藏着的时候不能让"鼠标刚好压在条上"绕过 dwell
+    // （路过顶边就弹出来，正是 2.3.4 修掉的那个"闪一下"）。
+    POINT cursor{};
+    const bool pointer_on_us =
+        phase_ == Phase::kNormal && GetCursorPos(&cursor) != FALSE &&
+        CursorOnWindow(cursor);
+
+    if (!pointer_on_us) {
+      // 顺位继承：**什么都不做**。不弹面板、不改 phase、不碰 dock_ —— 这条
+      // 激活不是用户要的，就不该产生任何可见效果（2.3.5 只做到"不弹"，
+      // 2.3.7 又补了"还焦点"，但两边都还留着"这次激活算不算在用"的歧义）。
+      //
+      // 为什么要清 last_foreground_：不清的话它会一直指着那个已经关掉的
+      // 窗口，之后用户真的去点任务栏图标也会被当成"继承"，面板永远叫不出来。
+      accidental_focus_ = true;
+      last_foreground_ = nullptr;
+      Trace("activate.inherited", alive ? 1 : 0, minimized ? 1 : 0);
+      // 这次"白捡的前台"会把键盘焦点也一起带走：用户关掉一个窗口之后接着
+      // 打字，字全进了一个看不见的窗口（要是之前点过搜索框，列表还会被悄悄
+      // 过滤）。此刻我们就是前台，把前台还给桌面是允许的。
+      ReleaseForegroundToShell();
+      return false;  // 别把焦点再交给 Flutter 视图
     }
-    return;
+    Trace("activate.inherited.but_pointer_on_us",
+          alive ? 1 : 0, minimized ? 1 : 0);
   }
 
   accidental_focus_ = false;
   Trace("activate.user");
   Reveal();
+  return true;
 }
+
+/// 把前台还给桌面。
+///
+/// 顺位继承来的激活一律要还：不还的话键盘焦点留在我们这儿（隐藏时窗口在
+/// 屏幕外，用户以为自己在跟别的程序说话），而且"前台是我们"会让
+/// [CanAutoHide] 的判断跟着一起错。
+///
+/// `SetForegroundWindow` 在某些前台锁（用户刚点了别的程序、UAC、锁屏）下会
+/// 静默失败，所以不拿它的返回值当结论，回头用 `GetForegroundWindow()` 复核。
+void EdgeDock::ReleaseForegroundToShell() {
+  const HWND shell = GetShellWindow();
+  if (shell == nullptr || SetForegroundWindow(shell) == FALSE) {
+    Trace("activate.inherited.release_focus", 0);
+    return;
+  }
+  // 复核：前台真的离开了我们，才算"白捡的前台"到此为止；还停在原地就保留
+  // accidental_focus_，让 CanAutoHide 继续按"这不是用户在用"处理。
+  const bool moved = GetForegroundWindow() != hwnd_;
+  Trace("activate.inherited.release_focus", 1, moved ? 1 : 0);
+  if (moved) accidental_focus_ = false;
+}
+
 
 void EdgeDock::NoteDeactivated() {
   accidental_focus_ = false;
@@ -495,6 +578,11 @@ void EdgeDock::SyncFromWindow() {
     if (phase_ != Phase::kNormal) ShowNow();
     StopTimer(&idle_timer_);
     dock_ = wxb::DockEdge::kNone;
+    // 最小化期间 idle 定时器是停着的，但**别的窗口照样会最小化**：不采样的话
+    // 等用户从任务栏还原回来，last_foreground_ 还指着最小化之前那个窗口
+    // （可能早就关了）→ 第一次真实激活被判成"继承"，面板叫不出来。这里顺手
+    // 采一次，代价只有一次 GetForegroundWindow。
+    TrackForeground();
     return;
   }
 
@@ -630,16 +718,7 @@ void EdgeDock::OnIdleTick() {
   if (!GetCursorPos(&pt)) return;
   // 每个 tick 刷一次工作区：显示器热插拔、任务栏自动隐藏都不一定发消息
   UpdateWorkArea();
-
-  // 记下"现在谁在前台"（只要不是我们自己）：下一次收到 WM_ACTIVATE 时，
-  // 靠它判断这次激活是用户主动的、还是别人关窗口/最小化后顺位继承来的。
-  // 我们被激活之后这里不会再覆盖（fg 就是我们自己），所以判据不会被冲掉。
-  const HWND fg = GetForegroundWindow();
-  if (fg != nullptr && fg != hwnd_) {
-    last_foreground_ = fg;
-    // 前台已经不是我们了：上一轮"白捡的前台"到此为止
-    accidental_focus_ = false;
-  }
+  TrackForeground();
 
   switch (phase_) {
     case Phase::kNormal:
@@ -681,9 +760,25 @@ void EdgeDock::OnIdleTick() {
   }
 }
 
+void EdgeDock::TrackForeground() {
+  if (hwnd_ == nullptr) return;
+  // 记下"现在谁在前台"（只要不是我们自己）：下一次收到 WM_ACTIVATE 时，
+  // 靠它判断这次激活是用户主动的、还是别人关窗口/最小化后顺位继承来的。
+  // 我们被激活之后这里不会再覆盖（fg 就是我们自己），所以判据不会被冲掉。
+  const HWND fg = GetForegroundWindow();
+  if (fg == nullptr || fg == hwnd_) return;
+  last_foreground_ = fg;
+  // 前台已经不是我们了：上一轮"白捡的前台"到此为止
+  accidental_focus_ = false;
+}
+
 void EdgeDock::OnLeaveTimeout() {
   StopTimer(&leave_timer_);
   if (phase_ != Phase::kLeaving) return;
+  // 这 180ms 里前台可能已经换人了（用户去点了别的程序）：判据要跟着走。
+  // 只在 idle tick 里采样是不够的 —— 离开等待 / 收起动画期间 idle 定时器是
+  // 停着的，正好把这段"别人最小化"的高发窗口漏掉。
+  TrackForeground();
 
   POINT pt{};
   const bool still_out =
@@ -759,6 +854,9 @@ void EdgeDock::OnAnimTick() {
     StopTimer(&anim_timer_);
     return;
   }
+  // 动画期间 idle 定时器是停着的，判据只能在这里补采样；否则"收起动画那
+  // 150ms 里别人最小化了一个窗口"会被当成用户主动激活（详见 OnActivated）。
+  TrackForeground();
   // 按帧推进（不是按墙钟）：晚到的 tick 只会让动画慢一点，不会"跳一大格"
   const double step =
       params_.animation_ms > 0
