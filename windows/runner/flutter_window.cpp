@@ -154,10 +154,14 @@ void FlutterWindow::OnWindowMethodCall(
 
   if (method == "snapToTop") {
     // 「贴到顶部」是唯一的贴边入口：Windows 的 Aero Snap 让"拖到顶边"这个
-    // 手势不可用（会直接最大化），所以只能点一下
-    if (dock_) dock_->SnapToTop();
+    // 手势不可用（会直接最大化），所以只能点一下。
+    //
+    // 返回值 = 这次贴顶之后真的能自动收起吗。窗口比工作区还高时
+    // ComputeDock 判不出贴顶，收起来连标题栏都找不回来，界面要据此提示
+    // 用户，而不是让他点了没反应。
+    const bool snapped = dock_ != nullptr && dock_->SnapToTop();
     PersistWindowState();
-    result->Success();
+    result->Success(flutter::EncodableValue(snapped));
     return;
   }
 
@@ -216,6 +220,18 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
       // 拖完就存：下一次启动直接到位，也避免关机时来不及保存
       PersistWindowState();
       break;
+    case WM_PARENTNOTIFY: {
+      // Flutter 视图是子窗口：客户区里的点击 / 滚轮不会发给顶层窗口，
+      // 只会以 WM_PARENTNOTIFY 的形式冒上来。用它告诉 EdgeDock「用户真的在
+      // 用这个面板」—— 否则顺位继承来的那次激活会让 accidental_focus_ 一直
+      // 挂着，鼠标一离开就收起，和 README 承诺的"正在用就不收"对不上。
+      const UINT what = LOWORD(wparam);
+      if (what == WM_LBUTTONDOWN || what == WM_RBUTTONDOWN ||
+          what == WM_MBUTTONDOWN || what == WM_MOUSEWHEEL) {
+        if (dock_) dock_->NoteUserInteraction();
+      }
+      break;
+    }
     case WM_ACTIVATE: {
       if (LOWORD(wparam) != WA_INACTIVE) {
         // 被激活：不一定真的要露出来 —— 别人关窗口/最小化时系统会把激活

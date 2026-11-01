@@ -34,7 +34,7 @@ class EdgeDock {
     int hidden_tick_ms = 40;    // 藏起来时的轮询间隔：要"碰到就弹回来"，得密一点
     int undocked_tick_ms = 250; // 没贴边时的轮询间隔：只为不错过"挪到顶边"
     int anim_tick_ms = 16;      // 动画帧间隔（~60fps）
-    int min_visible = 80;       // 夹回屏幕时至少留多少像素可见（逻辑像素）
+    int min_visible = wxb::kMinVisible;  // 夹回屏幕时至少留多少像素可见（逻辑像素）
   };
 
   EdgeDock() = default;
@@ -62,7 +62,11 @@ class EdgeDock {
   /// 为什么必须有一个显式动作：Windows 的 Aero Snap 会在鼠标碰到屏幕顶端时
   /// 直接最大化窗口，用户根本没法用"拖到顶边"这个手势（左右边更糟——会被
   /// 变成半屏贴靠）。所以贴顶是**点一下**完成的，不依赖拖拽。
-  void SnapToTop();
+  ///
+  /// 返回 false = 窗口比工作区还高，`ComputeDock` 判不出贴顶，收起来连标题栏
+  /// 都找不回来，所以只挪位置、不会自动收起。界面要把这件事说出来，
+  /// 不能像以前那样点了没反应。
+  bool SnapToTop();
 
   /// 窗口被激活（点任务栏图标 / Alt+Tab / 点了面板本身）：完整露出来。
   ///
@@ -82,6 +86,13 @@ class EdgeDock {
   /// 顺位继承来的激活会让窗口变成"藏着但仍是前台"。如果一直按"前台就不收"
   /// 处理，下次悬停弹出之后就再也收不回去了（鼠标离开也不收）。
   void NoteDeactivated();
+
+  /// 用户在窗口上点了鼠标 / 滚了滚轮（`WM_PARENTNOTIFY`）。
+  ///
+  /// 这是"他在用这个窗口"最硬的证据：继承来的那次激活会让窗口一直是前台，
+  /// 之后系统不会再发 `WM_ACTIVATE`，光靠激活消息永远清不掉
+  /// [accidental_focus_] —— 表现为"有时候鼠标一离开就收，有时候不收"。
+  void NoteUserInteraction();
 
   /// 立刻复位到"露出"状态：Alt+Tab、点任务栏图标、关窗口之前都要调。
   void ShowNow();
@@ -130,6 +141,9 @@ class EdgeDock {
   void StopAllTimers();
 
   void MoveTo(const RECT& rect);
+  /// 移动**并改尺寸**：只在启动恢复 / 贴顶这类"没有动画"的地方用。
+  /// 动画里必须走 [MoveTo]，尺寸一变 Flutter 每帧都要重排，滑动必然掉帧。
+  void PlaceTo(const RECT& rect);
   void UpdateWorkArea();
   /// |force| 为 false 时只在 DPI / 显示器变化后真的去问 DWM：边框宽度不会天天变，
   /// 每次 tick 都查一遍纯属白花。
@@ -137,12 +151,17 @@ class EdgeDock {
   /// kNormal 状态下把 rest_ / dock_ 对齐到"窗口现在的真实位置"。
   /// 不变量：kNormal 时 `rest_ == GetWindowRect()`。
   void RefreshNormalGeometry();
-  /// 别人全屏时把藏起来的窗口彻底 SW_HIDE，别在人家屏幕上留一条 4px 的亮线。
+  /// 别人全屏时把藏起来的窗口彻底收走（不是 `SW_HIDE`，见实现）。
   void SetSuppressed(bool suppressed);
-  /// 前台窗口是不是**真全屏**（整块显示器都被盖住）。
+  /// 前台窗口是不是**真全屏**（整块显示器都被盖住，且盖的是我们这块）。
   bool ForegroundIsFullscreen() const;
   wxb::Rect VisibleRest() const;
   RECT HiddenRect() const;
+  /// 被全屏内容挤走时窗口待的位置：整块推到工作区上方，一个像素都不留在屏幕上。
+  ///
+  /// 刻意不用 `SW_HIDE`：那会把任务栏按钮一起拿走，副屏全屏时用户就再也
+  /// 叫不出面板了（只能重启程序靠单实例逻辑捞回来）。
+  RECT SuppressedRect() const;
   bool CanAutoHide();
   bool CursorOnWindow(POINT pt) const;
   bool CursorOnStrip(POINT pt) const;
@@ -158,7 +177,7 @@ class EdgeDock {
   wxb::FramePadding pad_{0, 0, 0, 0};  // DWM 不可见边框（见 dock_math.h）
   double scale_ = 1.0;                 // 当前显示器的 DPI 缩放（96dpi = 1.0）
   double padding_scale_ = -1.0;        // 上次量边框时的 DPI 缩放
-  bool suppressed_ = false;            // 别人全屏 → 彻底隐藏（连 4px 条都不露）
+  bool suppressed_ = false;  // 别人全屏 → 整块挪到屏幕外（不是 SW_HIDE，见实现）
   bool in_size_move_ = false;
   bool topmost_ = false;  // 隐藏期间是否置顶（保证那 4px 条不被别的窗口盖住）
 

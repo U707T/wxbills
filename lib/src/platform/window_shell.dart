@@ -95,11 +95,13 @@ class WindowShell {
   ///
   /// **这是唯一的贴边入口**：Windows 的 Aero Snap 会在鼠标碰到屏幕顶端时
   /// 直接最大化窗口，所以"拖到顶边"根本走不通，只能由界面点一下。
+  ///
+  /// 返回 false 有两种情况：窗口通道不通，或者窗口比工作区还高——后者贴上去
+  /// 也不会自动收起（收起之后连标题栏都找不回来），界面必须把这件事说出来。
   static Future<bool> snapToTop() async {
     if (!isSupported) return false;
     try {
-      await channel.invokeMethod<void>('snapToTop');
-      return true;
+      return await channel.invokeMethod<bool>('snapToTop') ?? false;
     } catch (e) {
       debugPrint('贴到顶部失败：$e');
       return false;

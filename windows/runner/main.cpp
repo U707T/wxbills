@@ -6,6 +6,7 @@
 #include <utility>
 #include <vector>
 
+#include "dock_math.h"
 #include "flutter_window.h"
 #include "startup_trace.h"
 #include "utils.h"
@@ -18,6 +19,27 @@ bool HasFlag(const std::vector<std::string>& arguments, const char* flag) {
     if (argument == flag) return true;
   }
   return false;
+}
+
+// 建窗之前先按目标显示器的工作区夹一次。
+//
+// 这一步不能省：Create 用的是 ini 里的**物理像素**原样尺寸，从 4K 外接屏换到
+// 1080p 笔记本时，窗口第一帧就会是 3840x2160 —— 右下角的拉伸手柄正好在屏幕
+// 外，用户自己都拉不回来。EdgeDock::RestoreFromState 里还会再夹一次（兜住
+// "用户手改了 ini" 的情况），但那时候窗口已经画出来了。
+RECT ClampSavedRect(const RECT& rect) {
+  POINT center{rect.left + (rect.right - rect.left) / 2,
+               rect.top + (rect.bottom - rect.top) / 2};
+  const HMONITOR monitor = MonitorFromPoint(center, MONITOR_DEFAULTTONEAREST);
+  MONITORINFO info{};
+  info.cbSize = sizeof(info);
+  if (monitor == nullptr || !GetMonitorInfoW(monitor, &info)) return rect;
+  const wxb::Rect clamped = wxb::ClampToWork(
+      wxb::Rect{rect.left, rect.top, rect.right, rect.bottom},
+      wxb::Rect{info.rcWork.left, info.rcWork.top, info.rcWork.right,
+                info.rcWork.bottom},
+      wxb::kMinVisible);
+  return RECT{clamped.left, clamped.top, clamped.right, clamped.bottom};
 }
 
 // 没有记忆时的默认窗口：1280x720（逻辑像素）放在左上角
@@ -77,15 +99,17 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   const bool start_maximized = wxb::ShouldStartMaximized(state);
 
   FlutterWindow window(project, state);
-  Win32Window::Point origin(use_saved_rect ? state.rect.left : kDefaultX,
-                            use_saved_rect ? state.rect.top : kDefaultY);
+  // 默认尺寸是逻辑像素（physical=false 时 Create 会乘 DPI）；
+  // 记忆几何是物理像素，必须先夹回目标显示器的工作区。
+  const RECT startup =
+      use_saved_rect ? ClampSavedRect(state.rect)
+                     : RECT{kDefaultX, kDefaultY,
+                            kDefaultX + static_cast<LONG>(kDefaultWidth),
+                            kDefaultY + static_cast<LONG>(kDefaultHeight)};
+  Win32Window::Point origin(startup.left, startup.top);
   Win32Window::Size size(
-      use_saved_rect
-          ? static_cast<unsigned int>(state.rect.right - state.rect.left)
-          : kDefaultWidth,
-      use_saved_rect
-          ? static_cast<unsigned int>(state.rect.bottom - state.rect.top)
-          : kDefaultHeight);
+      static_cast<unsigned int>(startup.right - startup.left),
+      static_cast<unsigned int>(startup.bottom - startup.top));
 
   wxb::StartupTraceMark("native.before_create");
   // physical=true：保存下来的矩形已经是物理像素，不能再乘一次 DPI

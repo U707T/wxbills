@@ -138,8 +138,13 @@ void EdgeDock::RestoreFromState(const RECT& rect, bool maximized) {
   const wxb::Rect clamped = wxb::ClampToWork(ToWxb(rect), work_,
                                              Scaled(params_.min_visible));
   rest_ = ToRect(clamped);
-  if (clamped.left != rect.left || clamped.top != rect.top) {
-    MoveTo(rest_);
+  // 位置**和尺寸**都要落实。以前这里只比 left/top，而且走的是 MoveTo
+  // （带 SWP_NOSIZE），于是 ClampToWork 缩出来的宽高从来没被应用过：
+  // 从 4K 屏换到 1080p 笔记本，窗口会一直是 3840x2160，右下角的拉伸手柄
+  // 永远在屏幕外，用户自己都拉不回来。
+  if (rest_.left != rect.left || rest_.top != rect.top ||
+      rest_.right != rect.right || rest_.bottom != rect.bottom) {
+    PlaceTo(rest_);
   }
   // 停靠方向不单独存：它完全由几何决定，存两份只会有对不上的时候。
   if (maximized) {
@@ -150,8 +155,12 @@ void EdgeDock::RestoreFromState(const RECT& rect, bool maximized) {
   phase_ = Phase::kNormal;
 }
 
-void EdgeDock::SnapToTop() {
-  if (hwnd_ == nullptr) return;
+bool EdgeDock::SnapToTop() {
+  if (hwnd_ == nullptr) return false;
+  // 正在收 / 正在弹：动画定时器还在推窗口。不停掉它，这里把窗口挪到 rest_
+  // 之后 OnAnimTick 会继续把它推到隐藏位置 —— 点「贴到顶部」的结果反而是
+  // 收起来。别的入口（Reveal / ShowNow）都有这条守卫，这里不能例外。
+  if (phase_ != Phase::kNormal) ShowNow();
   // 最大化 / 最小化状态下没有"顶部"可言，先还原成普通窗口
   if (IsIconic(hwnd_) || IsZoomed(hwnd_)) {
     ShowWindow(hwnd_, SW_RESTORE);
@@ -161,24 +170,30 @@ void EdgeDock::SnapToTop() {
   UpdateFramePadding(true);
 
   RECT rect{};
-  if (!GetWindowRect(hwnd_, &rect)) return;
-  wxb::Rect r =
+  if (!GetWindowRect(hwnd_, &rect)) return false;
+  // 位置可以夹（把跑到屏幕外的窗口拉回来），**尺寸不动**：MoveTo 不改尺寸，
+  // 这里要是按 ClampToWork 缩过的宽高去记 rest_，就和真实窗口对不上
+  // （kNormal 的不变量是 rest_ == GetWindowRect()）。
+  const wxb::Rect clamped =
       wxb::ClampToWork(ToWxb(rect), work_, Scaled(params_.min_visible));
-  const int height = wxb::Height(r);
+  const int width = wxb::Width(ToWxb(rect));
+  const int height = wxb::Height(ToWxb(rect));
+  wxb::Rect r = ToWxb(rect);
+  r.left = clamped.left;
+  r.right = r.left + width;
   // 只把"看得见"的顶边吸到工作区顶：宽高都不动，也就不会触发 Flutter 重排
   r.top = work_.top - pad_.top;
   r.bottom = r.top + height;
   rest_ = ToRect(r);
-  dock_ = wxb::DockEdge::kTop;
   phase_ = Phase::kNormal;
   strip_since_ = 0;
 
-  if (suppressed_) {
-    suppressed_ = false;
-    ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
-  }
   MoveTo(rest_);
+  // 用真实几何重新判一次停靠：比工作区还高的窗口这里会得到 kNone，
+  // 说明"贴顶"只是把窗口挪上去、不会自动收起 —— 结论交给界面。
+  dock_ = wxb::ComputeDock(VisibleRest(), work_, Scaled(params_.tolerance));
   RestartIdleTimer();  // 换成"贴顶"档频率
+  return dock_ == wxb::DockEdge::kTop;
 }
 
 bool EdgeDock::ForegroundIsFullscreen() const {
@@ -204,7 +219,12 @@ bool EdgeDock::ForegroundIsFullscreen() const {
     info.cbSize = sizeof(info);
     const HMONITOR monitor =
         MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST);
-    if (monitor != nullptr && GetMonitorInfoW(monitor, &info)) {
+    // 必须盖住**我们这块**显示器：副屏放全屏视频时，主屏的条不该跟着躲。
+    // 条一躲就意味着那块屏上的面板没了唤出入口（只能重启程序靠单实例捞回来）。
+    const HMONITOR our_monitor =
+        MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST);
+    if (monitor != nullptr && monitor == our_monitor &&
+        GetMonitorInfoW(monitor, &info)) {
       covers_monitor = wxb::CoversWorkArea(ToWxb(rect), ToWxb(info.rcMonitor));
     }
   }
@@ -215,13 +235,17 @@ bool EdgeDock::ForegroundIsFullscreen() const {
 void EdgeDock::SetSuppressed(bool suppressed) {
   if (suppressed_ == suppressed || hwnd_ == nullptr) return;
   suppressed_ = suppressed;
+  strip_since_ = 0;
   Trace("suppress", suppressed ? 1 : 0, static_cast<int>(phase_));
   if (suppressed) {
-    // 别人全屏（游戏 / 视频 / 最大化）：连那 4px 也不该留在画面上
-    ShowWindow(hwnd_, SW_HIDE);
+    // 别人全屏（游戏 / 视频）：连那 4px 也不该留在画面上。
+    //
+    // 但**不用 SW_HIDE**：那会把任务栏按钮一起拿走，用户就只剩"重开一次
+    // 程序"这一条路（早期版本正是这么坏过的）。整块挪到任何显示器之外，
+    // 屏幕上一样什么都没有，窗口却还活着、任务栏按钮还在。
+    MoveTo(SuppressedRect());
     return;
   }
-  ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
   // 回来时仍然藏好，位置按当前工作区重算（期间可能换了分辨率）
   MoveTo(HiddenRect());
 }
@@ -231,11 +255,9 @@ void EdgeDock::ShowNow() {
   if (phase_ == Phase::kNormal && !animating() && !suppressed_) return;
   StopAllTimers();
   strip_since_ = 0;
-  if (suppressed_) {
-    // 被全屏挤走的那次：先让窗口重新可见，否则 move 一个隐藏窗口什么也看不见
-    suppressed_ = false;
-    ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
-  }
+  // 被全屏挤走的那次：窗口只是被挪到了显示器外面，没有 SW_HIDE，
+  // 所以不用再 ShowWindow 一次，取消抑制后直接摆回露出位置即可。
+  suppressed_ = false;
   if (topmost_) {
     SetWindowPos(hwnd_, HWND_NOTOPMOST, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -253,9 +275,9 @@ void EdgeDock::Reveal() {
   StopTimer(&leave_timer_);
   strip_since_ = 0;
   if (suppressed_) {
-    // 被全屏应用挤走的那次：先恢复可见并按隐藏位置摆好，再滑出来
+    // 被全屏应用挤走的那次：先按隐藏位置摆好，再滑出来
+    // （窗口没有 SW_HIDE，不用先 ShowWindow）
     suppressed_ = false;
-    ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
     MoveTo(HiddenRect());
   }
   // 藏着 / 正在收 / 正在弹：都走动画，别硬跳（硬跳就是"闪一下"）
@@ -300,6 +322,16 @@ void EdgeDock::OnActivated() {
     accidental_focus_ = true;
     last_foreground_ = nullptr;
     Trace("activate.inherited", alive ? 1 : 0, minimized ? 1 : 0);
+    // 面板不在"正常露出"状态时（藏着 / 正在收 / 正在弹），这次"白捡的前台"
+    // 会把键盘焦点也一起带走：用户关掉一个窗口之后接着打字，字全进了一个
+    // 看不见的窗口（要是之前点过搜索框，列表还会被悄悄过滤）。
+    // 此刻我们就是前台，把前台还给桌面是允许的。
+    if (phase_ != Phase::kNormal) {
+      const HWND shell = GetShellWindow();
+      const bool released =
+          shell != nullptr && SetForegroundWindow(shell) != FALSE;
+      Trace("activate.inherited.release_focus", released ? 1 : 0);
+    }
     return;
   }
 
@@ -312,13 +344,31 @@ void EdgeDock::NoteDeactivated() {
   accidental_focus_ = false;
 }
 
+void EdgeDock::NoteUserInteraction() {
+  // 点进来 / 滚轮：这次激活是不是继承来的已经不重要了，他在用这个窗口。
+  //
+  // 不清的话：继承激活之后窗口一直是前台，系统不会再发 WM_ACTIVATE，
+  // accidental_focus_ 永远清不掉 —— 鼠标一离开就收起；而同样的操作在正常
+  // 激活下不会收。用户只会觉得"有时收有时不收"。
+  if (!accidental_focus_) return;
+  accidental_focus_ = false;
+  Trace("interaction.clear_accidental");
+}
+
 // ---------------------------------------------------------------- 几何
 
 void EdgeDock::UpdateWorkArea() {
   if (hwnd_ == nullptr) return;
   MONITORINFO info{};
   info.cbSize = sizeof(info);
-  const HMONITOR monitor = MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST);
+  // 隐藏 / 抑制期间窗口本体不在它"该在"的地方：隐藏时大部分在屏幕上方，
+  // 抑制时干脆在 -32000。按窗口位置找显示器会找到别人家去，于是
+  // HiddenRect()/SuppressedRect() 会按错屏的工作区算 —— 表现为面板跑到
+  // 另一块屏幕上。这时候按"露出时的矩形"找。
+  const HMONITOR monitor =
+      (suppressed_ || hidden())
+          ? MonitorFromRect(&rest_, MONITOR_DEFAULTTONEAREST)
+          : MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST);
   if (monitor != nullptr && GetMonitorInfoW(monitor, &info)) {
     work_ = ToWxb(info.rcWork);  // rcWork 已经排除任务栏
     return;
@@ -351,7 +401,16 @@ void EdgeDock::UpdateFramePadding(bool force) {
 
 void EdgeDock::UpdateDpiScale() {
   if (hwnd_ == nullptr) return;
-  const UINT dpi = FlutterDesktopGetDpiForHWND(hwnd_);
+  UINT dpi = 0;
+  if (suppressed_ || hidden()) {
+    // 隐藏时窗口大半在屏幕上方，抑制时干脆在 -32000：按 HWND 查 DPI 会问到
+    // "离窗口最近的那块屏"，多屏上下叠放时拿到的不是面板所在的那块。
+    // 这时按露出时的矩形找显示器。
+    dpi = FlutterDesktopGetDpiForMonitor(
+        MonitorFromRect(&rest_, MONITOR_DEFAULTTONEAREST));
+  } else {
+    dpi = FlutterDesktopGetDpiForHWND(hwnd_);
+  }
   scale_ = dpi > 0 ? static_cast<double>(dpi) / 96.0 : 1.0;
 }
 
@@ -369,11 +428,34 @@ RECT EdgeDock::HiddenRect() const {
                                 Scaled(params_.peek), pad_));
 }
 
+RECT EdgeDock::SuppressedRect() const {
+  // 挪到任何显示器之外（-32000 是 Windows 上"丢到屏幕外"的惯用坐标）。
+  // 不能只往上推：副屏在主屏上方时，"工作区上方"正好是另一块屏幕，
+  // 那条 4px 就会亮在别人家的屏幕上。
+  const LONG width = rest_.right - rest_.left;
+  const LONG height = rest_.bottom - rest_.top;
+  RECT r{};
+  r.left = -32000;
+  r.top = -32000;
+  r.right = r.left + width;
+  r.bottom = r.top + height;
+  return r;
+}
+
 void EdgeDock::MoveTo(const RECT& rect) {
   if (hwnd_ == nullptr) return;
   // 只挪位置、不改尺寸：尺寸一变 Flutter 就要重排整棵树，滑动必然掉帧。
   SetWindowPos(hwnd_, nullptr, rect.left, rect.top, 0, 0,
                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS);
+}
+
+void EdgeDock::PlaceTo(const RECT& rect) {
+  if (hwnd_ == nullptr) return;
+  // 和 MoveTo 的唯一区别是**带尺寸**。只给启动恢复 / 贴顶这类一次性动作用：
+  // 那里没有动画，重排一次不影响手感；反过来，动画里绝对不能走这条。
+  SetWindowPos(hwnd_, nullptr, rect.left, rect.top, rect.right - rect.left,
+               rect.bottom - rect.top,
+               SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS);
 }
 
 void EdgeDock::RefreshNormalGeometry() {
@@ -419,9 +501,20 @@ void EdgeDock::SyncFromWindow() {
   if (hidden()) {
     // 隐藏期间换了分辨率/插拔显示器：按 rest_ 重算停靠位置，别露出半截
     UpdateDpiScale();
+    // 边框宽度跟着 DPI 变，而 HiddenRect() 是靠 pad_ 把"看得见的 4px"补偿
+    // 出来的。不重量一次，缩放从 100% 换到 150% 之后可见高度会算成负数——
+    // 条整根跑到屏幕外，hover 唤出彻底失效，只能从任务栏点回来。
+    UpdateFramePadding(true);
     rest_ = ToRect(wxb::ClampToWork(ToWxb(rest_), work_,
                                     Scaled(params_.min_visible)));
-    MoveTo(HiddenRect());
+    // 被全屏挤走时保持在工作区外面，别拽回 4px 位置
+    const RECT target = suppressed_ ? SuppressedRect() : HiddenRect();
+    RECT current{};
+    if (GetWindowRect(hwnd_, &current) && current.left == target.left &&
+        current.top == target.top) {
+      return;  // 已经在目标位置：别为了挪 0 像素再触发一次 WM_MOVE
+    }
+    MoveTo(target);
     return;
   }
 
@@ -442,19 +535,16 @@ bool EdgeDock::ForegroundIsOwnDialog() const {
 }
 
 bool EdgeDock::CanAutoHide() {
-  if (!enabled_ || hwnd_ == nullptr) return false;
-  if (dock_ == wxb::DockEdge::kNone) return false;
-  if (in_size_move_) return false;
-  if (IsIconic(hwnd_) || IsZoomed(hwnd_)) return false;
-  if (!IsWindowVisible(hwnd_)) return false;
-  if (ForegroundIsOwnDialog()) return false;
+  if (hwnd_ == nullptr) return false;
   // 窗口自己就是前台窗口：用户正在用它，这时候收起来等于"点一下就没"。
-  //
   // 但「顺位继承来的前台」不算：那不是用户想用这个窗口，只是系统把激活
-  // 塞给了我们（见 OnActivated）。这条区分很要紧 —— 少了它，
-  // 一次"关别人的窗口"就能让面板卡在"永远不收"的状态。
-  if (!accidental_focus_ && GetForegroundWindow() == hwnd_) return false;
-  return true;
+  // 塞给了我们（见 OnActivated）—— 少了这条，一次"关别人的窗口"就能让
+  // 面板卡在"永远不收"的状态。规则本身在 dock_math.h 里，有单测。
+  return wxb::CanAutoHideWith(
+      enabled_, dock_ != wxb::DockEdge::kNone, in_size_move_,
+      IsIconic(hwnd_) != FALSE, IsZoomed(hwnd_) != FALSE,
+      IsWindowVisible(hwnd_) != FALSE, ForegroundIsOwnDialog(),
+      GetForegroundWindow() == hwnd_, accidental_focus_);
 }
 
 bool EdgeDock::CursorOnWindow(POINT pt) const {

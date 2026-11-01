@@ -205,6 +205,94 @@ void TestSuppressStrip() {
   CHECK(!wxb::ShouldSuppressStrip(false, false, false, false, false));
 }
 
+void TestCanAutoHide() {
+  // 全部条件满足 → 可以收
+  CHECK(wxb::CanAutoHideWith(true, true, false, false, false, true, false,
+                              false, false));
+
+  // 每一项否决理由单独验一遍（改了实现就会有一条亮红）
+  CHECK(!wxb::CanAutoHideWith(false, true, false, false, false, true, false,
+                              false, false));  // 开关关了
+  CHECK(!wxb::CanAutoHideWith(true, false, false, false, false, true, false,
+                              false, false));  // 没贴顶
+  CHECK(!wxb::CanAutoHideWith(true, true, true, false, false, true, false,
+                              false, false));  // 正在拖 / 拉
+  CHECK(!wxb::CanAutoHideWith(true, true, false, true, false, true, false,
+                              false, false));  // 最小化
+  CHECK(!wxb::CanAutoHideWith(true, true, false, false, true, true, false,
+                              false, false));  // 最大化
+  CHECK(!wxb::CanAutoHideWith(true, true, false, false, false, false, false,
+                              false, false));  // 不可见
+  CHECK(!wxb::CanAutoHideWith(true, true, false, false, false, true, true,
+                              false, false));  // 自己的文件选择框在前台
+
+  // 自己是前台：正常激活 → 不收（用户正在用，收了等于"点一下就没"）
+  CHECK(!wxb::CanAutoHideWith(true, true, false, false, false, true, false,
+                              true, false));
+  // 自己是前台，但这次激活是顺位继承来的 → 照收（否则面板会卡在"永远不收"）
+  CHECK(wxb::CanAutoHideWith(true, true, false, false, false, true, false,
+                             true, true));
+}
+
+/// 贴顶 → 收起 → 展开这一整圈：三步的几何必须严丝合缝。
+///
+/// "展开是否完整"靠的是 FinishShow 里那次精确的 `MoveTo(rest_)`，而 `rest_`
+/// 是贴顶时算出来的。这里把契约钉住：贴顶后可见顶边 == 工作区顶边、收起后
+/// 屏幕上正好露 peek 像素、展开目标与原窗口同尺寸且仍然判得出贴顶。
+void TestSnapRevealCycle() {
+  struct Case {
+    wxb::Rect work;
+    wxb::Rect win;
+    int peek;
+    int tolerance;
+    wxb::FramePadding pad;
+  };
+  const Case cases[] = {
+      // 100% 缩放
+      {wxb::Rect{0, 0, 1920, 1040}, wxb::Rect{500, 300, 1400, 1000}, 4, 8,
+       wxb::FramePadding{7, 7, 7, 7}},
+      // 150% 缩放：peek 和容差都按 DPI 放大
+      {wxb::Rect{0, 0, 1920, 1040}, wxb::Rect{500, 300, 1400, 1000}, 6, 12,
+       wxb::FramePadding{10, 10, 10, 10}},
+      // 副屏在主屏上方（负坐标）
+      {wxb::Rect{0, -1080, 1920, 0}, wxb::Rect{500, -700, 1400, 0}, 4, 8,
+       wxb::FramePadding{7, 7, 7, 7}},
+  };
+  for (const Case& c : cases) {
+    // 1) 贴顶：可见顶边吸到工作区顶边，且判定为贴顶（会收起）
+    wxb::Rect snapped = c.win;
+    snapped.top = c.work.top - c.pad.top;
+    snapped.bottom = snapped.top + wxb::Height(c.win);
+    CHECK(wxb::VisibleRect(snapped, c.pad).top == c.work.top);
+    CHECK(wxb::ComputeDock(wxb::VisibleRect(snapped, c.pad), c.work,
+                           c.tolerance) == DockEdge::kTop);
+
+    // 2) 收起：屏幕上正好露 peek 像素，尺寸不变（MoveTo 只挪位置）
+    const wxb::Rect hidden =
+        wxb::HiddenRect(snapped, c.work, DockEdge::kTop, c.peek, c.pad);
+    CHECK(wxb::VisibleRect(hidden, c.pad).bottom == c.work.top + c.peek);
+    CHECK(wxb::Height(hidden) == wxb::Height(snapped));
+    CHECK(wxb::Width(hidden) == wxb::Width(snapped));
+
+    // 3) 展开目标是贴顶后的矩形：同尺寸、仍判得出贴顶，且再收起一次不漂移
+    CHECK(wxb::Width(snapped) == wxb::Width(c.win));
+    CHECK(wxb::Height(snapped) == wxb::Height(c.win));
+    const wxb::Rect again =
+        wxb::HiddenRect(snapped, c.work, DockEdge::kTop, c.peek, c.pad);
+    CHECK(again.top == hidden.top && again.bottom == hidden.bottom);
+  }
+
+  // 比工作区还高：贴顶之后判成 kNone，SnapToTop 返回 false，
+  // 界面提示"窗口比屏幕还高，先调矮一点"，而不是点了没反应。
+  const wxb::Rect work{0, 0, 1920, 1040};
+  const wxb::FramePadding pad{7, 7, 7, 7};
+  wxb::Rect tall{100, 0, 1000, 1150};  // 1150 高，比 1040 的工作区还高
+  tall.top = work.top - pad.top;
+  tall.bottom = tall.top + 1150;
+  CHECK(wxb::ComputeDock(wxb::VisibleRect(tall, pad), work, 8) ==
+        DockEdge::kNone);
+}
+
 }  // namespace
 
 int main() {
@@ -215,6 +303,8 @@ int main() {
   TestCoversWorkArea();
   TestInheritedActivation();
   TestSuppressStrip();
+  TestCanAutoHide();
+  TestSnapRevealCycle();
   TestEase();
 
   std::printf("%d checks, %d failed\n", g_checks, g_failed);

@@ -1,5 +1,60 @@
 # 更新日志
 
+## v2.3.7
+
+> 2.3.6 把「藏条」的判据修对了，但没检查它落地时**到底有没有生效**：
+> 窗口夹取出来的尺寸从来没被应用过，跨屏全屏让条整根消失，顺位激活把键盘
+> 焦点留在屏幕外。这一版全修，并把「贴顶 → 收起 → 展开」钉成回归用例。
+
+### 审计结论（6 处缺陷）
+
+| # | 缺陷 | 表现 |
+|---|------|------|
+| 1 | `ClampToWork()` 缩出来的宽高只被交给 `MoveTo()`（`SWP_NOSIZE`），`RestoreFromState` 还只比较 left/top | 从 4K 屏换到 1080p 笔记本，窗口一直是 3840×2160，右下角拉伸手柄在屏幕外，用户自己都拉不回来 |
+| 2 | `ForegroundIsFullscreen()` 没比对显示器：任何一块屏被全屏盖住都 `SW_HIDE` | 副屏放全屏视频，主屏的条被藏掉；`SW_HIDE` 连任务栏按钮一起消失 → 面板再也叫不出来，只能重启程序靠单实例捞回 |
+| 3 | 顺位继承的激活只"不弹面板"，前台仍归我们 | 关掉别的窗口后接着打字，字符全进了一个藏在屏幕外的窗口（点过搜索框的话，列表还会被悄悄过滤） |
+| 4 | `accidental_focus_` 只在"自己不是前台"时清 | 继承激活后点面板再移开鼠标照样收起；同样的操作在正常激活下不会 —— "有时收有时不收" |
+| 5 | 隐藏期间改 DPI / 插拔显示器不重量 DWM 边框 | `HiddenRect()` 靠 `pad_.bottom` 补偿可见像素，缩放 100%→150% 后可见高度算成负数：条整根跑出屏幕，悬停唤出彻底失效 |
+| 6 | `SnapToTop()` 是唯一没走 `animating()` 守卫的入口 | 收起动画期间触发贴顶，`OnAnimTick` 随后把窗口推到隐藏位置 —— 点了反而收起来 |
+
+### 修复
+
+- **夹取结果真的落地**：新增 `EdgeDock::PlaceTo()`（带尺寸的
+  `SetWindowPos`），只给启动恢复 / 贴顶这类一次性动作用；动画仍走 `MoveTo`，
+  避免 Flutter 每帧重排。`RestoreFromState` 改成整矩形比较。
+- **建窗之前就夹一次**：`main.cpp` 新增 `ClampSavedRect()`，按目标显示器工作区
+  夹记忆几何 —— 否则第一帧就是超大窗口，之后每帧都在跟它较劲。
+- **只有盖住「我们这块」显示器才躲**：`ForegroundIsFullscreen()` 比对
+  `MonitorFromWindow(hwnd_)`；且抑制改为把窗口挪到 `-32000`（`SuppressedRect()`），
+  保留任务栏按钮，不再 `SW_HIDE`。
+- **顺位激活归还前台**：面板不在 `kNormal` 时 `SetForegroundWindow(GetShellWindow())`，
+  日志记 `activate.inherited.release_focus`。
+- **点一下就算在用**：新增 `NoteUserInteraction()`，由 `WM_PARENTNOTIFY`
+  （左/右/中键、滚轮）触发，清掉 `accidental_focus_`
+  （日志 `interaction.clear_accidental`）。
+- **隐藏期间重量边框**：`SyncFromWindow()` 的 hidden 分支补
+  `UpdateFramePadding(true)`；顺带在目标位置没变时不重复 `MoveTo`。
+- **贴顶统一守卫并回报结果**：`SnapToTop()` 返回 bool（比工作区还高的窗口
+  只挪位置、不会自动收起），`window_shell.dart` / `app_controller.dart`
+  据此给出准确提示，不再说"这个平台不支持"。
+- **隐藏 / 抑制期间按 `rest_` 找显示器**：`UpdateWorkArea()` 与
+  `UpdateDpiScale()` 在窗口本体位于屏幕外时改用
+  `MonitorFromRect(&rest_)`，否则多屏上下叠放时面板会跑到另一块屏。
+
+### 测试
+
+- C++ 断言 **81 → 116 条**：
+  - 新增 `TestCanAutoHide()`（10 条）：8 种否决理由逐个验证，外加
+    "自己是前台但激活是继承来的 → 照收"。
+  - 新增 `TestSnapRevealCycle()`（25 条）：贴顶后可见顶边 == 工作区顶边、
+    收起后屏幕上正好露 peek 像素、展开目标同尺寸且仍判得出贴顶、再收起不漂移；
+    覆盖 100% / 150% / 负坐标副屏 / 窗口比工作区高四种场景。
+- `test/window_shell_test.dart` 按新契约改：`snapToTop` 的 true / false /
+  无返回值三种情况。
+- 本地 `flutter analyze` 无问题，`flutter test --no-pub` **113 项全过**。
+- `edge_dock.cc` / `flutter_window.cpp` / `main.cpp` 用最小 Win32 + Flutter 桩
+  头文件按 `-Wall -Wextra` 过了语法检查（**不是链接验证**，真机构建仍需 CI）。
+
 ## v2.3.6
 
 > 2.3.5 修好「关窗口时自己弹出来」，却换来了「收起之后再也叫不出来」。

@@ -79,8 +79,29 @@ void main() {
     expect(calls, isEmpty, reason: '不该在 Android 上建一个没人接的通道');
   });
 
-  test('snapToTop 让 runner 把窗口挪到屏幕顶部', () async {
+  test('snapToTop 把 runner 的结论原样带回来', () async {
+    // runner 返回 true：贴上去了，而且鼠标离开会真的收起
+    handle((call) async {
+      calls.add(call);
+      expect(call.method, 'snapToTop');
+      return true;
+    });
     expect(await WindowShell.snapToTop(), isTrue);
-    expect(calls.single.method, 'snapToTop');
+
+    // 窗口比工作区还高：runner 也只挪位置、不会自动收起，返回 false
+    handle((call) async {
+      calls.add(call);
+      return false;
+    });
+    expect(await WindowShell.snapToTop(), isFalse);
+
+    // 旧 runner / 通道没返回值：按失败处理，不能假装成功（否则界面会
+    // 承诺一个不存在的自动收起）
+    handle((call) async {
+      calls.add(call);
+      return null;
+    });
+    expect(await WindowShell.snapToTop(), isFalse);
+    expect(calls.length, 3);
   });
 }

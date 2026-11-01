@@ -787,7 +787,7 @@ class AppController extends ChangeNotifier {
     final ok = await WindowShell.snapToTop();
     showToast(ok
         ? '已贴到屏幕顶部：鼠标离开会自动收起，碰到屏幕顶边弹回来'
-        : '贴到顶部没成功（这个平台不支持）');
+        : '贴到顶部了，但不会自动收起：窗口比屏幕还高，先把它调矮一点再来一次');
   }
 
   void _setBusy(bool busy, String label, double fraction) {

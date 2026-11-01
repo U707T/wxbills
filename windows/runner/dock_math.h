@@ -89,6 +89,12 @@ inline bool InPeekStrip(const Rect& rest, const Rect& work, DockEdge dock,
          x >= rest.left - margin && x <= rest.right + margin;
 }
 
+/// 夹回工作区时至少留多少像素可见（逻辑像素）。
+///
+/// `EdgeDock::Params::min_visible` 用它当默认值，`main.cpp` 在建窗之前夹
+/// 记忆几何时也用它 —— 同一个数字不要在三个地方各写一遍。
+inline constexpr int kMinVisible = 80;
+
 /// 把矩形夹回工作区：先缩到能放下的尺寸，再保证横向/纵向各有至少
 /// [min_visible] 像素可见。
 ///
@@ -159,12 +165,36 @@ inline bool IsInheritedActivation(bool has_previous, bool previous_alive,
 /// 早先按"盖住工作区"判断，于是最大化窗口一在前台，条就被 `SW_HIDE`；
 /// `SW_HIDE` 的窗口连任务栏按钮一起消失，用户就再也叫不出面板了
 /// （表现为"收起之后无法触发"）。
+///
+/// [covers_monitor] 必须是「盖住**我们这块**显示器」：副屏放全屏视频时，
+/// 主屏的条不该跟着躲——条一躲，那块屏上的面板就没了唤出入口。
 inline bool ShouldSuppressStrip(bool has_foreground, bool same_process,
                                 bool is_desktop, bool is_maximized,
                                 bool covers_monitor) {
   if (!has_foreground || same_process || is_desktop) return false;
   if (is_maximized) return false;
   return covers_monitor;
+}
+
+/// 现在能不能自动收起？
+///
+/// 全是调用方从 Win32 现查的布尔值：这里只做判断，`dock_math_test.cpp` 能把
+/// 每一种否决理由（没开 / 没贴顶 / 在拖 / 最小化 / 最大化 / 不可见 / 自己开着
+/// 对话框 / 自己是前台）分别跑一遍。
+///
+/// [foreground_is_self] 与 [accidental_focus] 是一对：窗口自己是前台时默认
+/// **不收**（用户正在用，收起来等于"点一下就没"）；但如果这次前台是顺位继承
+/// 来的（[IsInheritedActivation]），就不算用户在用它。
+inline bool CanAutoHideWith(bool enabled, bool docked, bool in_size_move,
+                            bool iconic, bool zoomed, bool visible,
+                            bool own_dialog, bool foreground_is_self,
+                            bool accidental_focus) {
+  if (!enabled || !docked || in_size_move) return false;
+  if (iconic || zoomed) return false;
+  if (!visible) return false;
+  if (own_dialog) return false;
+  if (foreground_is_self && !accidental_focus) return false;
+  return true;
 }
 
 /// 缓动：二次曲线。**收起和弹回用的不是同一条**：
