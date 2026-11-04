@@ -181,11 +181,22 @@ inline bool IsShellSurfaceClass(const wchar_t* class_name) {
 /// （点了别的窗口、鼠标又不在上面）再自己收回去。
 ///
 /// 参数全是调用方从 Win32 现查的，这里只做判断，方便在 dock_math_test 里
-/// 把四种组合都跑一遍。
+/// 把各种组合都跑一遍。
+///
+/// [previous_sample_fresh] 是**整个判据的前提**：`last_foreground_` 是轮询
+/// 采样来的，而轮询在"自己最小化""收起/弹回动画"期间是停着的。样本一过期，
+/// `IsWindow()` 查到的就是十几秒前的旧窗口（很可能已经关掉了）—— 于是用户
+/// 真的去点任务栏，也会被当成"继承"，面板一点反应都没有（changelog v2.3.6
+/// 第 2 条就是这个，当时只补了"用完即清"，没解决样本过期）。
+///
+/// 过期时**一律当成用户主动**：最坏的后果是面板多弹一次（用户再点一下别的
+/// 窗口它就收回去）；反过来判错就是"面板叫不出来"，用户只能重启程序。
 inline bool IsInheritedActivation(bool has_previous, bool previous_alive,
                                   bool previous_minimized,
-                                  bool previous_visible) {
+                                  bool previous_visible,
+                                  bool previous_sample_fresh = true) {
   if (!has_previous) return false;  // 没记到上一个前台：按"用户主动"处理
+  if (!previous_sample_fresh) return false;  // 样本过期：不可信，按用户主动
   return !previous_alive || previous_minimized || !previous_visible;
 }
 
@@ -221,21 +232,58 @@ inline bool ShouldSuppressStrip(bool has_foreground, bool same_process,
 ///
 /// 全是调用方从 Win32 现查的布尔值：这里只做判断，`dock_math_test.cpp` 能把
 /// 每一种否决理由（没开 / 没贴顶 / 在拖 / 最小化 / 最大化 / 不可见 / 自己开着
-/// 对话框 / 自己是前台）分别跑一遍。
+/// 对话框 / 自己是前台 / 刚被唤出）分别跑一遍。
 ///
 /// [foreground_is_self] 与 [accidental_focus] 是一对：窗口自己是前台时默认
 /// **不收**（用户正在用，收起来等于"点一下就没"）；但如果这次前台是顺位继承
 /// 来的（[IsInheritedActivation]），就不算用户在用它。
+///
+/// [within_reveal_grace] 是"刚被用户主动唤出（点任务栏 / Alt+Tab）之后的
+/// 保护期"：那一刻鼠标还在任务栏上、不在窗口里，光看"鼠标是否在窗口内"会
+/// 立刻把它收回去 —— 用户看到的就是**窗口闪一下就没了**。这段时间内不收。
 inline bool CanAutoHideWith(bool enabled, bool docked, bool in_size_move,
                             bool iconic, bool zoomed, bool visible,
                             bool own_dialog, bool foreground_is_self,
-                            bool accidental_focus) {
+                            bool accidental_focus,
+                            bool within_reveal_grace = false) {
   if (!enabled || !docked || in_size_move) return false;
   if (iconic || zoomed) return false;
   if (!visible) return false;
   if (own_dialog) return false;
+  if (within_reveal_grace) return false;
   if (foreground_is_self && !accidental_focus) return false;
   return true;
+}
+
+/// 贴顶状态下窗口"贴上去了但没贴平"（可见顶边跑到工作区上方）？
+///
+/// 这是"卡一半在顶部"的几何特征：贴顶的窗口只有两种合法位置 —— 完整露出来
+/// （可见顶边 == 工作区顶边）或整个藏起来（只留 peek）。夹在中间说明有一次
+/// 动画/还原被打断了，用户自己没法把它弄回来（Aero Snap 在顶边会直接最大化，
+/// 所以他也拖不出这种位置）。
+inline bool IsHalfBuried(const Rect& visible, const Rect& work, DockEdge dock) {
+  return dock == DockEdge::kTop && visible.top < work.top;
+}
+
+/// 窗口是不是"屏幕上几乎看不见"（露在工作区里的高度 < [min_visible]）？
+///
+/// 用户**不可能**自己把窗口拖成这样：横向再怎么拖，`DragMove` 也会留一条
+/// 标题栏在屏幕上；能变成这样的只有三种情况：
+///  * 收起的动画被打断，窗口停在半路（"卡一半在顶部"）；
+///  * 从任务栏还原时目标位置还是"隐藏矩形"（只剩 4px）；
+///  * 记忆几何来自另一台机器 / 另一块屏幕，夹取没落实到尺寸。
+///
+/// 这些状态用户自己救不回来（看不见窗口，也就没地方点、没地方拖），所以
+/// 调用方一旦发现就把它放回工作区顶边。
+inline bool IsNearlyOffscreen(const Rect& visible, const Rect& work,
+                              int min_visible) {
+  const int top = visible.top > work.top ? visible.top : work.top;
+  const int bottom = visible.bottom < work.bottom ? visible.bottom : work.bottom;
+  const int left = visible.left > work.left ? visible.left : work.left;
+  const int right = visible.right < work.right ? visible.right : work.right;
+  if (right <= left) return true;   // 水平方向完全出界
+  if (bottom <= top) return true;   // 垂直方向完全出界
+  return (bottom - top) < (min_visible > 0 ? min_visible : 1);
 }
 
 /// 缓动：二次曲线。**收起和弹回用的不是同一条**：

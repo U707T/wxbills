@@ -122,7 +122,14 @@ void EdgeDock::Attach(HWND hwnd, bool enabled) {
   topmost_ = false;
   strip_since_ = 0;
   last_foreground_ = nullptr;
+  last_foreground_tick_ = 0;
   accidental_focus_ = false;
+  reveal_tick_ = 0;
+  was_iconic_ = false;
+  restored_tick_ = 0;
+  anim_started_ = 0;
+  anim_budget_ms_ = 0;
+  repairing_ = false;
   SyncFromWindow();
   if (enabled_) StartIdleTimer();
 }
@@ -134,7 +141,14 @@ void EdgeDock::Detach() {
   topmost_ = false;
   strip_since_ = 0;
   last_foreground_ = nullptr;
+  last_foreground_tick_ = 0;
   accidental_focus_ = false;
+  reveal_tick_ = 0;
+  was_iconic_ = false;
+  restored_tick_ = 0;
+  anim_started_ = 0;
+  anim_budget_ms_ = 0;
+  repairing_ = false;
   dock_ = wxb::DockEdge::kNone;
 }
 
@@ -304,6 +318,7 @@ void EdgeDock::ShowNow() {
   if (hwnd_ == nullptr) return;
   if (phase_ == Phase::kNormal && !animating() && !suppressed_) return;
   StopAllTimers();
+  anim_started_ = 0;
   strip_since_ = 0;
   // 被全屏挤走的那次：窗口只是被挪到了显示器外面，没有 SW_HIDE，
   // 所以不用再 ShowWindow 一次，取消抑制后直接摆回露出位置即可。
@@ -318,12 +333,35 @@ void EdgeDock::ShowNow() {
   if (enabled_) StartIdleTimer();
 }
 
+bool EdgeDock::IsSizeMoving() {
+  if (!in_size_move_) return false;
+  if (GetCapture() != nullptr ||
+      (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0) {
+    return true;
+  }
+  // 标志位过期：左键早就松了、本线程也没有捕获。复位，否则自动收起 / 唤出 /
+  // 贴顶会一起静默失效（用户看到的是"点任务栏没反应"）。
+  in_size_move_ = false;
+  Trace("size_move.stale_reset");
+  return false;
+}
+
 void EdgeDock::Reveal() {
   if (hwnd_ == nullptr) return;
   // 正在拖 / 拉伸窗口：位置是用户的手指说了算，这里一动就变成"拽回去"
-  if (in_size_move_) return;
+  if (IsSizeMoving()) return;
   StopTimer(&leave_timer_);
   strip_since_ = 0;
+  // 用户主动唤出：给一段保护期（`Params::reveal_grace_ms`）。
+  // 这一刻鼠标通常还压在任务栏上，不在窗口里；没有保护期的话，下一次 idle
+  // tick 就会判成"鼠标离开"→ 180ms 后收起，用户看到的是"闪一下就没了"。
+  reveal_tick_ = GetTickCount();
+  // 最小化状态下"滑出来"没有意义（窗口根本不在屏幕上，动画没人看得见）：
+  // 直接把还原位置摆到 rest_，随后系统的"还原"会把窗口放出来。
+  if (IsIconic(hwnd_) != FALSE) {
+    ShowNow();
+    return;
+  }
   if (suppressed_) {
     // 被全屏应用挤走的那次：先按隐藏位置摆好，再滑出来
     // （窗口没有 SW_HIDE，不用先 ShowWindow）
@@ -348,6 +386,17 @@ void EdgeDock::Reveal() {
 bool EdgeDock::OnActivated() {
   if (hwnd_ == nullptr) return false;
 
+  // ---- 先判"从最小化还原"这条**最硬的证据** ----
+  //
+  // 顺位继承的激活不会把窗口从最小化里拉出来；能把窗口从任务栏还原的只有
+  // 用户。以前这条没有，一次"样本过期"就够让这次激活被判成继承 → 面板
+  // 什么都不做 → 用户看到的是"点任务栏，收起的窗口没了"。
+  const DWORD now = GetTickCount();
+  const bool restored =
+      was_iconic_ || IsIconic(hwnd_) != FALSE ||
+      (restored_tick_ != 0 &&
+       static_cast<DWORD>(now - restored_tick_) <= kRestoredWindowMs);
+
   // 这次激活是系统「顺位」给的，不是用户想用这个窗口：
   // 别的窗口被关掉 / 最小化后，前台会交给 Z 序里的下一个可见窗口，
   // 而藏在屏幕外的面板正好是 `WS_VISIBLE` 的、还置顶 —— 于是"别的窗口一
@@ -364,7 +413,14 @@ bool EdgeDock::OnActivated() {
       visible = IsWindowVisible(prev) != FALSE;
     }
   }
-  if (wxb::IsInheritedActivation(has_previous, alive, minimized, visible)) {
+  // 样本必须新鲜：轮询在最小化 / 动画期间是停着的，`prev` 可能是十几秒前
+  // 就已经关掉的窗口 —— 拿它判"继承"会把真正点任务栏的那次也判错。
+  const bool fresh =
+      last_foreground_tick_ != 0 &&
+      static_cast<DWORD>(now - last_foreground_tick_) <= kForegroundSampleTtlMs;
+  if (!restored &&
+      wxb::IsInheritedActivation(has_previous, alive, minimized, visible,
+                                 fresh)) {
     // 唯一例外：面板本来就露着，而且鼠标正压在它上面 —— 那是用户自己点进来的，
     // 不管上一个前台是什么状态（他可能刚最小化了 A，顺手回来点面板）。
     //
@@ -384,6 +440,7 @@ bool EdgeDock::OnActivated() {
       // 窗口，之后用户真的去点任务栏图标也会被当成"继承"，面板永远叫不出来。
       accidental_focus_ = true;
       last_foreground_ = nullptr;
+      last_foreground_tick_ = 0;
       Trace("activate.inherited", alive ? 1 : 0, minimized ? 1 : 0);
       // 这次"白捡的前台"会把键盘焦点也一起带走：用户关掉一个窗口之后接着
       // 打字，字全进了一个看不见的窗口（要是之前点过搜索框，列表还会被悄悄
@@ -393,6 +450,12 @@ bool EdgeDock::OnActivated() {
     }
     Trace("activate.inherited.but_pointer_on_us",
           alive ? 1 : 0, minimized ? 1 : 0);
+  } else if (restored) {
+    Trace("activate.restored", hidden() ? 1 : 0, animating() ? 1 : 0);
+  } else if (has_previous && !fresh) {
+    // 只在日志里留一条：这次"按用户主动处理"是因为样本过期，不是因为
+    // 上一个前台确实还活着。真机排查时这两者要能分开。
+    Trace("activate.user.stale_sample", alive ? 1 : 0, minimized ? 1 : 0);
   }
 
   accidental_focus_ = false;
@@ -436,6 +499,17 @@ void EdgeDock::NoteUserInteraction() {
   if (!accidental_focus_) return;
   accidental_focus_ = false;
   Trace("interaction.clear_accidental");
+}
+
+bool EdgeDock::InterceptMinimize() {
+  if (hwnd_ == nullptr) return false;
+  // 只拦"收着"的时候：露着的窗口点任务栏按钮本来就是最小化，那是用户的意图。
+  if (phase_ != Phase::kHidden && !animating()) return false;
+  if (dock_ == wxb::DockEdge::kNone && !suppressed_) return false;
+  Trace("minimize.intercepted", static_cast<int>(phase_),
+        suppressed_ ? 1 : 0);
+  Reveal();
+  return true;
 }
 
 // ---------------------------------------------------------------- 几何
@@ -563,19 +637,99 @@ void EdgeDock::RefreshNormalGeometry() {
     // 频率跟着"贴没贴顶"换档（40 / 100 / 250ms），不能等下次重启
     RestartIdleTimer();
   }
+  // 兜底：kNormal 不等于"窗口一定在用户看得见的地方"（动画被打断、从任务栏
+  // 还原到隐藏位置都会留下这种残局）。每 tick 花一次矩形比较就能自愈。
+  RepairNormalPlacement();
+}
+
+/// 窗口"屏幕上几乎看不见"时把它放回工作区。
+///
+/// 为什么必须有这一步：贴边隐藏的**唯一真相是窗口坐标**，而坐标会被三种
+/// 外力改掉 —— 被打断的动画、从最小化还原时被写成"隐藏矩形"的还原位置、
+/// 从别的机器/显示器带过来的越界记忆几何。这些状态下用户看不见窗口，
+/// 也就没有任何地方可以点、可以拖，只能重装或改 ini。
+///
+/// 保守到什么程度：只有"露在工作区里的高度 < min_visible（默认 80px）"或
+/// "贴顶却钻到工作区上方去了"才动手，而且只在 kNormal 且不在拖动时。
+/// 用户自己在拖窗口时（`in_size_move_`）一律不碰，拖到一半的合法位置不会被抢走。
+void EdgeDock::RepairNormalPlacement() {
+  if (hwnd_ == nullptr || repairing_ || IsSizeMoving()) return;
+  if (phase_ != Phase::kNormal) return;
+  if (IsIconic(hwnd_) || IsZoomed(hwnd_) || !IsWindowVisible(hwnd_)) return;
+
+  RECT rect{};
+  if (!GetWindowRect(hwnd_, &rect)) return;
+  const wxb::Rect current = ToWxb(rect);
+  const wxb::Rect visible = wxb::VisibleRect(current, pad_);
+  const bool nearly_invisible =
+      wxb::IsNearlyOffscreen(visible, work_, Scaled(params_.min_visible));
+  const bool half_buried = wxb::IsHalfBuried(visible, work_, dock_);
+  if (!nearly_invisible && !half_buried) return;
+
+  // 只挪位置、不改尺寸（`MoveTo` 是 SWP_NOSIZE：尺寸一变 Flutter 就要重排）
+  wxb::Rect fixed = current;
+  const int width = wxb::Width(current);
+  const int height = wxb::Height(current);
+
+  // 1) 水平方向整块跑到工作区外侧（换了显示器 / 手改了 ini）：贴到最近的那条边
+  if (fixed.right <= work_.left) {
+    fixed.left = work_.left;
+  } else if (fixed.left >= work_.right) {
+    fixed.left = work_.right - width;
+  }
+  fixed.right = fixed.left + width;
+
+  // 2) 垂直方向：窗口主要在工作区下半部（被拖到屏幕下方）就贴底，否则贴顶。
+  //    贴的必须是**看得见的那条边**，否则按键计算出来的贴顶判定会越偏越远。
+  const int visible_center_y = (visible.top + visible.bottom) / 2;
+  const bool align_bottom = height <= wxb::Height(work_) &&
+                            visible_center_y > (work_.top + work_.bottom) / 2;
+  if (align_bottom) {
+    fixed.bottom = work_.bottom + pad_.bottom;
+    fixed.top = fixed.bottom - height;
+  } else {
+    fixed.top = work_.top - pad_.top;
+    fixed.bottom = fixed.top + height;
+  }
+
+  repairing_ = true;
+  rest_ = ToRect(fixed);
+  MoveTo(rest_);  // 会同步派发 WM_MOVE → SyncFromWindow → 这里，repairing_ 挡住
+  dock_ = wxb::ComputeDock(VisibleRest(), work_, Scaled(params_.tolerance));
+  phase_ = Phase::kNormal;
+  repairing_ = false;
+  Trace("repair.placement", fixed.top, nearly_invisible ? 1 : 0);
+  RestartIdleTimer();
+}
+
+DWORD EdgeDock::AnimationBudget() const {
+  // 帧步进理论上 150ms 就走完了；WM_TIMER 是低优先级消息，消息队列被 Flutter
+  // 的渲染消息塞满时会被饿死。给 3 倍时长 + 200ms 的预算，超了就硬跳到终点。
+  DWORD ms = params_.animation_ms > 0
+                 ? static_cast<DWORD>(params_.animation_ms)
+                 : 150u;
+  const DWORD budget = ms * 3 + 200;
+  return budget < 600 ? 600 : budget;
 }
 
 void EdgeDock::SyncFromWindow() {
   if (hwnd_ == nullptr) return;
-  // 拖动/拉拽过程中不必跟着算：每次 WM_MOVE 都做一遍纯属浪费，松手时会算
-  if (in_size_move_) return;
+  // 拖动/拉拽过程中不必跟着算：每次 WM_MOVE 都做一遍纯属浪费，松手时会算。
+  // （`IsSizeMoving()` 会顺带把卡住的标志位复位，见它的注释）
+  if (IsSizeMoving()) return;
   UpdateWorkArea();
-  if (animating()) return;  // 动画中改目标会跳帧
 
-  if (IsIconic(hwnd_)) {
-    // 最小化：必须退出隐藏状态。留在屏幕外的话，从任务栏还原出来的是
-    // 一个"看不见的窗口"，用户只能再点一次任务栏。顺便停掉轮询省点电。
-    if (phase_ != Phase::kNormal) ShowNow();
+  // ---- 1. 最小化：必须排在 animating() 前面 ----
+  //
+  // 点任务栏按钮 / Win+D 把窗口最小化时，很可能正好落在 150ms 的滑动动画里。
+  // 以前 `if (animating()) return;` 写在最前面，于是这次最小化被整个忽略，
+  // 动画随后 `FinishHide()` 把**隐藏矩形**写成了最小化窗口的还原位置：
+  // 用户再从任务栏点回来，窗口就还原到屏幕上方只剩 4px —— 也就是
+  // "卡在顶部 / 看着像消失了"。
+  if (IsIconic(hwnd_) != FALSE) {
+    was_iconic_ = true;
+    // 动画必须立刻停掉，否则它会把"还原位置"写成隐藏位置
+    if (phase_ != Phase::kNormal || animating()) ShowNow();
     StopTimer(&idle_timer_);
     dock_ = wxb::DockEdge::kNone;
     // 最小化期间 idle 定时器是停着的，但**别的窗口照样会最小化**：不采样的话
@@ -584,6 +738,13 @@ void EdgeDock::SyncFromWindow() {
     // 采一次，代价只有一次 GetForegroundWindow。
     TrackForeground();
     return;
+  }
+
+  const bool restored = was_iconic_;
+  if (restored) {
+    was_iconic_ = false;
+    restored_tick_ = GetTickCount();
+    Trace("restore.from_iconic", hidden() ? 1 : 0, animating() ? 1 : 0);
   }
 
   if (hidden()) {
@@ -595,6 +756,15 @@ void EdgeDock::SyncFromWindow() {
     UpdateFramePadding(true);
     rest_ = ToRect(wxb::ClampToWork(ToWxb(rest_), work_,
                                     Scaled(params_.min_visible)));
+    if (restored) {
+      // 从任务栏还原出来的窗口**绝不能停在隐藏位置**：用户点那一下是要用它，
+      // 不是想再看一次那 4px。以前这里直接 MoveTo(HiddenRect())，窗口还原成
+      // 一条边，用户以为程序坏了。
+      // 走 Reveal()（而不是直接 BeginShow）：它顺带处理"被全屏挤走"（窗口
+      // 在 -32000）和"刚被唤出"的保护期，避免窗口从屏幕左上角斜着飞进来。
+      Reveal();
+      return;
+    }
     // 被全屏挤走时保持在工作区外面，别拽回 4px 位置
     const RECT target = suppressed_ ? SuppressedRect() : HiddenRect();
     RECT current{};
@@ -604,6 +774,13 @@ void EdgeDock::SyncFromWindow() {
     }
     MoveTo(target);
     return;
+  }
+
+  if (animating()) {
+    // 动画中来了一次"最小化 → 还原"：把动画目标改成"露出来"，从当前矩形
+    // 重新起步（BeginShow 会重新采样 anim_from_）。
+    if (restored) Reveal();
+    return;  // 动画中改目标会跳帧
   }
 
   RefreshNormalGeometry();
@@ -628,11 +805,22 @@ bool EdgeDock::CanAutoHide() {
   // 但「顺位继承来的前台」不算：那不是用户想用这个窗口，只是系统把激活
   // 塞给了我们（见 OnActivated）—— 少了这条，一次"关别人的窗口"就能让
   // 面板卡在"永远不收"的状态。规则本身在 dock_math.h 里，有单测。
+  //
+  // 还有一条"刚被用户唤出"的保护期：从任务栏点回来的那一刻，鼠标还在任务栏
+  // 上、不在窗口里，没有它就会立刻判成"鼠标离开"→ 180ms 后收起 →
+  // 用户看到的是"窗口闪一下就没了"。
+  const DWORD now = GetTickCount();
+  const bool within_grace =
+      reveal_tick_ != 0 &&
+      static_cast<DWORD>(now - reveal_tick_) <
+          static_cast<DWORD>(params_.reveal_grace_ms > 0
+                                 ? params_.reveal_grace_ms
+                                 : 1);
   return wxb::CanAutoHideWith(
-      enabled_, dock_ != wxb::DockEdge::kNone, in_size_move_,
+      enabled_, dock_ != wxb::DockEdge::kNone, IsSizeMoving(),
       IsIconic(hwnd_) != FALSE, IsZoomed(hwnd_) != FALSE,
       IsWindowVisible(hwnd_) != FALSE, ForegroundIsOwnDialog(),
-      GetForegroundWindow() == hwnd_, accidental_focus_);
+      GetForegroundWindow() == hwnd_, accidental_focus_, within_grace);
 }
 
 bool EdgeDock::CursorOnWindow(POINT pt) const {
@@ -679,7 +867,12 @@ void EdgeDock::StartIdleTimer() {
   // 结果只要有一条消息没按预期到达，功能就整体静默失效（用户看到的就是
   // "贴边完全没生效"）。宁可每秒醒 4 次，也不要靠事件必须准时。
   int interval = params_.undocked_tick_ms;
-  if (phase_ == Phase::kHidden) {
+  if (animating()) {
+    // 动画期间 idle 定时器不停：它兼职看门狗（见 OnIdleTick）。
+    // WM_TIMER 被消息队列饿死、或者动画定时器干脆没建起来时，靠它把窗口
+    // 落到终点，而不是卡在屏幕上方半路。
+    interval = params_.hidden_tick_ms;
+  } else if (phase_ == Phase::kHidden) {
     interval = params_.hidden_tick_ms;
   } else if (dock_ != wxb::DockEdge::kNone) {
     interval = params_.idle_tick_ms;
@@ -716,7 +909,32 @@ void EdgeDock::OnIdleTick() {
   }
   POINT pt{};
   if (!GetCursorPos(&pt)) return;
+
+  // ---- 动画期间：这个 tick 现在是**看门狗**，不是状态机 ----
+  //
+  // 以前动画一来就把 idle 定时器停掉，只留一个 16ms 的动画定时器。只要那个
+  // 定时器丢了（WM_TIMER 是低优先级消息、SetTimer 也可能失败），phase_ 就会
+  // 永远停在 kShowing/kHiding，而两个定时器全没了 —— 窗口卡在屏幕上方半路，
+  // 除了重启没有任何东西能把它救回来，也就是用户说的"卡一半在顶部"。
+  if (animating()) {
+    TrackForeground();  // 动画期间也要保持"上一个前台"的样本新鲜
+    const bool budget_over =
+        anim_started_ != 0 &&
+        static_cast<DWORD>(GetTickCount() - anim_started_) > anim_budget_ms_;
+    if (anim_timer_ == 0 || budget_over) {
+      Trace(anim_timer_ == 0 ? "anim.watchdog.lost" : "anim.watchdog.deadline",
+            static_cast<int>(phase_), anim_hiding_ ? 1 : 0);
+      if (anim_hiding_) {
+        FinishHide();
+      } else {
+        FinishShow();
+      }
+    }
+    return;
+  }
+
   // 每个 tick 刷一次工作区：显示器热插拔、任务栏自动隐藏都不一定发消息
+  // （动画期间不刷：窗口大半个在屏幕外，MonitorFromWindow 可能问到隔壁那块屏）
   UpdateWorkArea();
   TrackForeground();
 
@@ -768,6 +986,7 @@ void EdgeDock::TrackForeground() {
   const HWND fg = GetForegroundWindow();
   if (fg == nullptr || fg == hwnd_) return;
   last_foreground_ = fg;
+  last_foreground_tick_ = GetTickCount();  // 样本新鲜度，见 OnActivated
   // 前台已经不是我们了：上一轮"白捡的前台"到此为止
   accidental_focus_ = false;
 }
@@ -776,8 +995,8 @@ void EdgeDock::OnLeaveTimeout() {
   StopTimer(&leave_timer_);
   if (phase_ != Phase::kLeaving) return;
   // 这 180ms 里前台可能已经换人了（用户去点了别的程序）：判据要跟着走。
-  // 只在 idle tick 里采样是不够的 —— 离开等待 / 收起动画期间 idle 定时器是
-  // 停着的，正好把这段"别人最小化"的高发窗口漏掉。
+  // 这段时间 idle 定时器是停着的（kLeaving），正好把"别人就在这时最小化了
+  // 一个窗口"这段高发窗口漏掉 —— 样本一过期，下一次激活就会判错。
   TrackForeground();
 
   POINT pt{};
@@ -801,14 +1020,20 @@ void EdgeDock::BeginHide() {
   anim_to_ = HiddenRect();
   anim_progress_ = 0.0;
   anim_hiding_ = true;
-  StopTimer(&idle_timer_);
+  anim_started_ = GetTickCount();
+  anim_budget_ms_ = AnimationBudget();
   StopTimer(&leave_timer_);
+  // **不停 idle 定时器**：动画期间它兼看门狗（见 OnIdleTick），
+  // 动画定时器一旦丢了/超时了，靠它把窗口落到终点。
+  RestartIdleTimer();
+  StopTimer(&anim_timer_);
   anim_timer_ = SetTimer(hwnd_, kTimerAnim,
                          static_cast<UINT>(params_.anim_tick_ms), nullptr);
 }
 
 void EdgeDock::FinishHide() {
   StopTimer(&anim_timer_);
+  anim_started_ = 0;
   phase_ = Phase::kHidden;
   strip_since_ = 0;
   Trace("hide.done");
@@ -825,19 +1050,29 @@ void EdgeDock::BeginShow() {
   if (hwnd_ == nullptr) return;
   phase_ = Phase::kShowing;
   strip_since_ = 0;
+  StopTimer(&leave_timer_);  // 中途唤出：别再被之前那次"离开"收回去
   Trace("show.begin");
   RECT current{};
-  anim_from_ = GetWindowRect(hwnd_, &current) ? current : anim_to_;
+  if (GetWindowRect(hwnd_, &current)) {
+    anim_from_ = current;
+  } else {
+    anim_from_ = rest_;  // 取不到就以露出位置为起点（别用上一次的目标）
+  }
   anim_to_ = rest_;
   anim_progress_ = 0.0;
   anim_hiding_ = false;
-  StopTimer(&idle_timer_);
+  anim_started_ = GetTickCount();
+  anim_budget_ms_ = AnimationBudget();
+  // 同 BeginHide：idle 定时器留着当看门狗
+  RestartIdleTimer();
+  StopTimer(&anim_timer_);
   anim_timer_ = SetTimer(hwnd_, kTimerAnim,
                          static_cast<UINT>(params_.anim_tick_ms), nullptr);
 }
 
 void EdgeDock::FinishShow() {
   StopTimer(&anim_timer_);
+  anim_started_ = 0;
   phase_ = Phase::kNormal;
   Trace("show.done");
   MoveTo(rest_);
@@ -854,9 +1089,21 @@ void EdgeDock::OnAnimTick() {
     StopTimer(&anim_timer_);
     return;
   }
-  // 动画期间 idle 定时器是停着的，判据只能在这里补采样；否则"收起动画那
+  // idle 定时器在动画期间也是开着的，判据在这里再补采一次；否则"收起动画那
   // 150ms 里别人最小化了一个窗口"会被当成用户主动激活（详见 OnActivated）。
   TrackForeground();
+  // 兜底：帧步进理论上不会超时，但 WM_TIMER 会被消息队列饿死 —— 超预算就地
+  // 落到终点，宁可硬跳一下，也不要卡在屏幕上方半路。
+  if (anim_started_ != 0 &&
+      static_cast<DWORD>(GetTickCount() - anim_started_) > anim_budget_ms_) {
+    Trace("anim.deadline", static_cast<int>(phase_), anim_hiding_ ? 1 : 0);
+    if (anim_hiding_) {
+      FinishHide();
+    } else {
+      FinishShow();
+    }
+    return;
+  }
   // 按帧推进（不是按墙钟）：晚到的 tick 只会让动画慢一点，不会"跳一大格"
   const double step =
       params_.animation_ms > 0

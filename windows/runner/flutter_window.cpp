@@ -209,6 +209,16 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
         flutter_controller_->engine()->ReloadSystemFonts();
       }
       break;
+    case WM_SYSCOMMAND:
+      // 面板收成 4px 的时候，"最小化"是**误触**：点任务栏按钮时 Windows 会
+      // 发这条（它只按"这个窗口还是前台"判断，不知道面板已经缩到屏幕上方），
+      // 交出去就变成"在任务栏点一下，收起的主页面消失了"。
+      // 收着的时候用户连窗口都看不见，最小化没有任何意义 —— 换成"露出来"。
+      if ((wparam & 0xFFF0) == SC_MINIMIZE && dock_ != nullptr &&
+          dock_->InterceptMinimize()) {
+        return 0;
+      }
+      break;
     case WM_ENTERSIZEMOVE:
       if (dock_) dock_->SetInSizeMove(true);
       break;

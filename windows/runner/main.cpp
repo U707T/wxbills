@@ -86,7 +86,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
     const HWND existing = ::FindWindowW(Win32Window::kRunnerWindowClassName,
                                         L"wxbills");
     if (existing != nullptr) {
-      ::ShowWindow(existing, SW_RESTORE);
+      // 只有**真的最小化**时才 SW_RESTORE：对普通窗口它会把最大化的窗口
+      // 还原成普通尺寸（用户第二次双击图标，窗口就莫名其妙变小了）。
+      // 收起的面板没被最小化，直接 SetForegroundWindow 就会触发
+      // WM_ACTIVATE，它自己会滑出来。
+      if (::IsIconic(existing)) {
+        ::ShowWindow(existing, SW_RESTORE);
+      }
       ::SetForegroundWindow(existing);  // 触发 WM_ACTIVATE，贴边隐藏的窗口会自己回来
     }
     ::CloseHandle(single_instance);

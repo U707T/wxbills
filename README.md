@@ -33,6 +33,9 @@
   窗口自己正被使用（是当前活动窗口）时不会收，点了别的窗口才恢复自动收起；
   关掉 / 最小化别的窗口也不会把它叫出来、也不会跟着收起，只有**全屏**应用盖住这块屏幕时
   那条边才躲起来（副屏全屏不影响主屏的条，而且躲起来时任务栏按钮还在，随时点得回来）。
+  收着的时候**点任务栏按钮 / 再点一次桌面图标 / Alt+Tab 都会整块滑出来**（不会只剩一条边，
+  也不会变成最小化）；万一位置被外力改坏（动画被打断、换显示器），下一次轮询会自己
+  把窗口摆回工作区，不用重启。
   不用拖拽——Windows 会把"拖到顶边"直接变成最大化，所以贴顶是点一下完成的。
   行为对不上时用 `wxbills.exe --edge-trace` 启动，状态转换会写到
   `%TEMP%\wxbills-edge.log`。
@@ -97,7 +100,7 @@
 export PATH=/opt/flutter/bin:$PATH
 flutter pub get
 flutter analyze
-flutter test                      # 108 项：OCR 回归 / 同步端到端 / 原图同步 / 复制图片 / 存储 / 扫描 / UI / 窗口开关
+flutter test                      # 113 项：OCR 回归 / 同步端到端 / 原图同步 / 复制图片 / 存储 / 扫描 / UI / 窗口开关
 # 贴边隐藏的几何单测（纯 C++，不依赖 Flutter 和 Windows）
 g++ -std=c++17 -Wall -Wextra -Werror windows/runner/dock_math_test.cpp -o /tmp/dock_math_test && /tmp/dock_math_test
 flutter build apk --debug --target-platform=android-arm64
@@ -127,7 +130,7 @@ type $env:TEMP\wxbills-startup.log
 | `test/boot_sync_test.dart` | 启动时真的会跑一次自动同步（scan 与 sync 不互相抢 _busy） |
 | `test/app_ui_test.dart` | 空态、排序、搜索、编辑、删除、设置页、提示条真的能显示、说明只弹一次、窗口开关（Windows 显示 / 非 Windows 不显示） |
 | `test/window_shell_test.dart` | 窗口开关通道：读回、写入参数、通道不通时降级、非 Windows 完全不碰通道 |
-| `windows/runner/dock_math_test.cpp` | 贴边几何（C++）：顶边判定、藏到哪、唤出热区、全屏覆盖判定（含壳表面 / 最小化 / DWM 隐身）、拔显示器后夹回（含缩尺寸）、缓动不过冲 |
+| `windows/runner/dock_math_test.cpp` | 贴边几何（C++）：顶边判定、藏到哪、唤出热区、全屏覆盖判定（含壳表面 / 最小化 / DWM 隐身）、拔显示器后夹回（含缩尺寸）、缓动不过冲、样本过期 fail-open、唤出保护期、"几乎看不见/卡半截"的自愈判据（158 条断言） |
 | `test/ux_prefs_test.dart` | 启动不自动扫相册（手动才刷新）/ 开关生效 / 一次性说明持久化 / 提示去重 / 列表缓存失效 |
 
 同步测试用 `test/support/test_dav_server.dart` 起一个内存 WebDAV 服务器，
@@ -177,3 +180,28 @@ windows/runner/
   金额所在高度不再写死，截图带状态栏 / 长截图也能认；但**其他 App 的付款截图**
   或整段聊天记录截图仍需要调整字形模板。
 - 本应用不收集、不上传任何图片；同步只把你自己的记录与缩略图写到你自己的网盘。
+
+---
+
+## 本地构建缓存（沙箱）
+
+> `build/` + `.dart_tool/` 合计约 **1.4 GB**，大头都是同一产物的重复拷贝；但沙箱 `dl.google.com` 不通，**要重下的东西不能删**。详见 `/workspace/AI通用说明.md` §2。
+
+| 路径 | 现状（2026-11-04） | 怎么办 |
+|---|---|---|
+| `.dart_tool/flutter_build/<hash>` | 1 份 / 75 MB | 保留最新 1 份（曾累积 7 份 = 409 MB） |
+| `build/test_cache/build/*.dill` | 1 份 / 54 MB | 只留最新（曾累积 20 份 = 1.1 GB） |
+| `build/app/intermediates` | 约 880 MB | **别删**，删了下次全量重编 |
+| `build/app/outputs/apk/debug/` | 与 `outputs/flutter-apk/` 同一份 | 可删 |
+| `~/.pub-cache/hosted` | 全局 | **别删** |
+
+清理（安全）：
+
+```bash
+ls -t .dart_tool/flutter_build | tail -n +2 | xargs -r -I{} rm -rf .dart_tool/flutter_build/{}
+ls -t build/test_cache/build/*.dill | tail -n +2 | xargs -r rm -f
+rm -rf build/app/outputs/apk/debug
+```
+
+- debug APK 正常体积 **84 MB**（arm64 单 ABI）。600 MB+ 说明 `llvm-strip` 失效（AI通用说明 §7.2）。
+- 本地验证优先 `flutter test --no-pub`；只在要装真机时才 `flutter build apk --debug --target-platform=android-arm64`。

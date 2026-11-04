@@ -34,6 +34,11 @@ class EdgeDock {
     int hidden_tick_ms = 40;    // 藏起来时的轮询间隔：要"碰到就弹回来"，得密一点
     int undocked_tick_ms = 250; // 没贴边时的轮询间隔：只为不错过"挪到顶边"
     int anim_tick_ms = 16;      // 动画帧间隔（~60fps）
+    /// 用户主动唤出之后这段时间内不自动收起（毫秒）。
+    ///
+    /// 从任务栏点回来时鼠标还压在任务栏上、根本不在窗口里，光按"鼠标离开就收"
+    /// 会在 180ms 后立刻把刚露出来的窗口收回 —— 用户看到的是"闪一下就没了"。
+    int reveal_grace_ms = 700;
     int min_visible = wxb::kMinVisible;  // 夹回屏幕时至少留多少像素可见（逻辑像素）
   };
 
@@ -98,11 +103,33 @@ class EdgeDock {
   /// [accidental_focus_] —— 表现为"有时候鼠标一离开就收，有时候不收"。
   void NoteUserInteraction();
 
+  /// `WM_SYSCOMMAND(SC_MINIMIZE)` 的拦截：只有"收着"的时候才拦。
+  ///
+  /// 面板收成 4px 之后，**点任务栏按钮在 Windows 眼里是"最小化当前活动窗口"**
+  /// （它不知道面板已经缩到屏幕上方去了，只按"这个窗口还是前台"处理），
+  /// 于是那一下不是把面板叫出来，而是把它最小化 —— 用户看到的就是
+  /// "在任务栏单击，收起的主页面消失了"。
+  ///
+  /// 收着的面板上"最小化"对用户没有任何意义（他连窗口都看不见），
+  /// 所以这里直接把这次最小化换成"露出来"。
+  ///
+  /// 返回 true = 已吃掉这条消息，调用方不要再交给 `DefWindowProc`。
+  bool InterceptMinimize();
+
   /// 立刻复位到"露出"状态：Alt+Tab、点任务栏图标、关窗口之前都要调。
   void ShowNow();
 
   /// 用户开始/结束拖动：拖动过程中不自动收（这时候收起来等于打断用户）。
   void SetInSizeMove(bool in_size_move) { in_size_move_ = in_size_move; }
+
+  /// 真的在拖动 / 拉伸吗？
+  ///
+  /// 不能只看 `in_size_move_`：`WM_EXITSIZEMOVE` **不一定来**（拖到一半弹出
+  /// 系统菜单、远程桌面断线、窗口被别的程序 `SetCapture`）。标志位一旦卡在
+  /// true，自动收起、唤出、贴顶全都静默失效，用户看到的是"点任务栏没反应"。
+  /// 所以额外核对"左键是否真的按着 / 本线程是否真的持有鼠标捕获"，两者都不
+  /// 成立就当它过期，顺手复位。
+  bool IsSizeMoving();
 
   /// 保存几何时用这个：隐藏状态下拿到的是"露出时"的矩形，不是屏幕外那个。
   RECT rest_rect() const { return rest_; }
@@ -130,6 +157,14 @@ class EdgeDock {
   static constexpr UINT_PTR kTimerLeave = 0x1002;
   static constexpr UINT_PTR kTimerAnim = 0x1003;
 
+  /// [last_foreground_] 这个样本的有效期：超过就当成"没见过"，即按用户主动
+  /// 处理（原因见 `wxb::IsInheritedActivation`）。
+  static constexpr DWORD kForegroundSampleTtlMs = 500;
+
+  /// "刚从最小化还原"的有效期：这段时间里的激活一律按用户主动处理
+  /// （顺位继承不会把窗口从最小化里拉出来）。
+  static constexpr DWORD kRestoredWindowMs = 1500;
+
   void StartIdleTimer();
   void RestartIdleTimer();
   void StopTimer(UINT_PTR* id);
@@ -155,6 +190,13 @@ class EdgeDock {
   /// kNormal 状态下把 rest_ / dock_ 对齐到"窗口现在的真实位置"。
   /// 不变量：kNormal 时 `rest_ == GetWindowRect()`。
   void RefreshNormalGeometry();
+  /// kNormal 下发现窗口"屏幕上几乎看不见"（动画中断、还原到隐藏位置…）时
+  /// 把它放回工作区顶边。见 `wxb::IsNearlyOffscreen`。
+  void RepairNormalPlacement();
+  /// 动画的时间预算（毫秒）：超过这个时长还没走完，就直接落到终点。
+  /// 帧步进理论上不会超时，但 WM_TIMER 是低优先级消息，消息队列堵住时会被
+  /// 饿死；没有这条兜底，phase_ 会永远停在 kShowing/kHiding，窗口卡在半路。
+  DWORD AnimationBudget() const;
   /// 别人全屏时把藏起来的窗口彻底收走（不是 `SW_HIDE`，见实现）。
   void SetSuppressed(bool suppressed);
   /// 前台窗口是不是**真全屏**（整块显示器都被盖住，且盖的是我们这块）。
@@ -205,11 +247,40 @@ class EdgeDock {
   ///    → 什么都不做（见 [OnActivated]）。
   HWND last_foreground_ = nullptr;
 
+  /// 上面那个样本的采样时刻（GetTickCount）。0 = 还没采过。
+  ///
+  /// 轮询在"自己最小化"期间是停着的（`kLeaving` 的 180ms 也不采），样本可能
+  /// 已经过期几十秒；过期的样本一概不可信（见 `wxb::IsInheritedActivation`）。
+  DWORD last_foreground_tick_ = 0;
+
   /// 这次前台是系统「顺位」塞给我们的，不是用户想用这个窗口。
   ///
   /// 有它才能两头都对：顺位激活既不弹面板，也不让"前台"这条规则把窗口钉住
   /// （否则悬停弹出来之后就收不回去了）。
   bool accidental_focus_ = false;
+
+  /// 上次**用户主动**唤出的时刻（GetTickCount，0 = 没有过）。
+  /// 保护期见 `Params::reveal_grace_ms`。
+  DWORD reveal_tick_ = 0;
+
+  /// 我们自己是不是正处在"被最小化"的状态。
+  ///
+  /// 不直接用 `IsIconic()`：`WM_SIZE(SIZE_MINIMIZED)` 与随后的
+  /// `WM_ACTIVATE` 谁先到不确定，还原那一刻 `IsIconic()` 可能已经是 false 了。
+  bool was_iconic_ = false;
+
+  /// 最近一次"从最小化还原"的时刻。还原动作**只可能是用户做的**
+  /// （顺位继承不会把窗口从最小化里拉出来），所以这段时间内的激活一律按
+  /// 用户主动处理，不再看 `last_foreground_` 那个可能过期的样本。
+  DWORD restored_tick_ = 0;
+
+  /// 动画开始时刻 + 预算（见 [AnimationBudget]）。
+  DWORD anim_started_ = 0;
+  DWORD anim_budget_ms_ = 0;
+
+  /// [RepairNormalPlacement] 里的重入保护：`MoveTo` 会同步派发 `WM_MOVE`，
+  /// 那条消息又会走回 `SyncFromWindow` → `RefreshNormalGeometry`。
+  bool repairing_ = false;
 
   RECT anim_from_{};
   RECT anim_to_{};

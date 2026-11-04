@@ -188,6 +188,79 @@ void TestInheritedActivation() {
 
   // 窗口还在但已经不可见：同样不算用户主动
   CHECK(wxb::IsInheritedActivation(true, true, false, false));
+
+  // ---- 样本过期：一律按"用户主动" ----
+  //
+  // 轮询在"自己最小化 / 收起动画"期间是停着的，`last_foreground_` 可能是
+  // 十几秒前就关掉的窗口。拿过期样本判"继承"的结果就是：用户真的点任务栏，
+  // 面板一点反应都没有（叫不出来，只能重启）。过期必须 fail-open。
+  CHECK(!wxb::IsInheritedActivation(true, false, false, false, false));
+  CHECK(!wxb::IsInheritedActivation(true, true, true, true, false));
+  CHECK(!wxb::IsInheritedActivation(true, true, false, false, false));
+  // 新鲜样本时才按原判据
+  CHECK(wxb::IsInheritedActivation(true, false, false, false, true));
+  CHECK(!wxb::IsInheritedActivation(true, true, false, true, true));
+}
+
+void TestNearlyOffscreen() {
+  const wxb::Rect work{0, 0, 1920, 1040};
+  const wxb::FramePadding pad{7, 7, 7, 7};
+  const int min_visible = wxb::kMinVisible;  // 80
+
+  // 正常窗口 / 铺满工作区：都不是"看不见"
+  CHECK(!wxb::IsNearlyOffscreen(wxb::Rect{100, 100, 1000, 800}, work,
+                                min_visible));
+  CHECK(!wxb::IsNearlyOffscreen(wxb::Rect{0, 0, 1920, 1040}, work,
+                                min_visible));
+  // 只露出 200px：还是够用户抓住标题栏的
+  CHECK(!wxb::IsNearlyOffscreen(wxb::Rect{100, -600, 1000, 200}, work,
+                                min_visible));
+  // 露出的高度正好等于下限：不算
+  CHECK(!wxb::IsNearlyOffscreen(wxb::Rect{100, -600, 1000, 80}, work,
+                                min_visible));
+
+  // 收起的 4px 条：屏幕上几乎什么都没有 → 要救
+  const wxb::Rect rest{100, 0, 1000, 700};
+  const wxb::Rect hidden = wxb::HiddenRect(rest, work, DockEdge::kTop, 4, pad);
+  CHECK(wxb::IsNearlyOffscreen(wxb::VisibleRect(hidden, pad), work,
+                               min_visible));
+
+  // 只剩 40px（小于下限）→ 也要救：这个高度用户既看不懂也点不到
+  CHECK(wxb::IsNearlyOffscreen(wxb::Rect{100, -660, 1000, 40}, work,
+                               min_visible));
+
+  // 水平方向完全出界（记错了显示器 / 换了分辨率）→ 救
+  CHECK(wxb::IsNearlyOffscreen(wxb::Rect{-2000, 100, -900, 800}, work,
+                               min_visible));
+  CHECK(wxb::IsNearlyOffscreen(wxb::Rect{2000, 100, 3000, 800}, work,
+                               min_visible));
+
+  // 救回来之后：可见顶边对齐工作区顶边，且不再判成"看不见"
+  wxb::Rect fixed = hidden;
+  fixed.top = work.top - pad.top;
+  fixed.bottom = fixed.top + wxb::Height(hidden);
+  CHECK(wxb::VisibleRect(fixed, pad).top == work.top);
+  CHECK(wxb::VisibleRect(fixed, pad).bottom ==
+        work.top + wxb::Height(rest) - pad.top - pad.bottom);
+  CHECK(!wxb::IsNearlyOffscreen(wxb::VisibleRect(fixed, pad), work,
+                                min_visible));
+  // 尺寸一动不动（MoveTo 只挪位置，Flutter 不用重排）
+  CHECK(wxb::Width(fixed) == wxb::Width(hidden));
+  CHECK(wxb::Height(fixed) == wxb::Height(hidden));
+
+  // ---- 贴顶状态下"贴上了但没贴平" = 卡在中间 ----
+  CHECK(!wxb::IsHalfBuried(wxb::Rect{100, work.top, 1000, 700}, work,
+                           DockEdge::kTop));
+  CHECK(wxb::IsHalfBuried(wxb::Rect{100, work.top - 1, 1000, 700}, work,
+                          DockEdge::kTop));
+  CHECK(wxb::IsHalfBuried(wxb::Rect{100, work.top - 300, 1000, 400}, work,
+                          DockEdge::kTop));
+  // 在容差内往下偏一点（外框溢出）不算卡住
+  CHECK(!wxb::IsHalfBuried(wxb::Rect{100, work.top + 5, 1000, 700}, work,
+                           DockEdge::kTop));
+  // 没贴顶的窗口不适用：用户自己拖到半个屏幕外面是他的自由
+  CHECK(!wxb::IsHalfBuried(wxb::Rect{100, work.top - 300, 1000, 400}, work,
+                           DockEdge::kNone));
 }
 
 void TestSuppressStrip() {
@@ -273,6 +346,13 @@ void TestCanAutoHide() {
   // 自己是前台，但这次激活是顺位继承来的 → 照收（否则面板会卡在"永远不收"）
   CHECK(wxb::CanAutoHideWith(true, true, false, false, false, true, false,
                              true, true));
+
+  // 刚被用户从任务栏唤出：鼠标还压在任务栏上，这时候就收等于"闪一下就没"
+  CHECK(!wxb::CanAutoHideWith(true, true, false, false, false, true, false,
+                              false, false, true));
+  // 保护期过了照常收
+  CHECK(wxb::CanAutoHideWith(true, true, false, false, false, true, false,
+                             false, false, false));
 }
 
 /// 贴顶 → 收起 → 展开这一整圈：三步的几何必须严丝合缝。
@@ -343,6 +423,7 @@ int main() {
   TestClampToWork();
   TestCoversWorkArea();
   TestInheritedActivation();
+  TestNearlyOffscreen();
   TestSuppressStrip();
   TestShellSurfaceClass();
   TestCanAutoHide();
