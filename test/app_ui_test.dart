@@ -181,6 +181,68 @@ void main() {
     await cleanup(tester, tmp);
   });
 
+  testWidgets('输入整数也能筛出带小数的金额（66 → 66.5，不再「没反应」）',
+      (tester) async {
+    final (tmp, controller) = await buildController(tester, bills: [
+      sample('a', 6650),
+      sample('b', 6605),
+      sample('c', 1000),
+    ]);
+    await tester.pumpWidget(WxBillsApp(controller: controller));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField).first, '66');
+    await tester.pumpAndSettle();
+
+    expect(find.text('¥ 66.50'), findsOneWidget, reason: '输入 66 要能筛出 66.5');
+    expect(find.text('¥ 66.05'), findsOneWidget, reason: '同一整数部分的都算命中');
+    expect(find.text('¥ 10'), findsNothing, reason: '不相关的记录要被筛掉');
+
+    await cleanup(tester, tmp);
+  });
+
+  testWidgets('没有这个金额：列表不筛窄，并说明「没有 ¥99 的记录」',
+      (tester) async {
+    final (tmp, controller) = await buildController(tester, bills: [
+      sample('a', 6650),
+      sample('b', 1000),
+    ]);
+    await tester.pumpWidget(WxBillsApp(controller: controller));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField).first, '99');
+    await tester.pumpAndSettle();
+
+    // 列表退回全量（不是清空）：「定位」还要靠它跳到最接近的一张
+    expect(find.text('¥ 66.50'), findsOneWidget);
+    expect(find.text('¥ 10'), findsOneWidget);
+    // 但必须说清是「没这个金额」，而不是让用户以为搜索框没反应
+    expect(find.textContaining('没有 ¥99 的记录'), findsOneWidget);
+
+    await cleanup(tester, tmp);
+  });
+
+  testWidgets('定位到「最接近的」时会说明，不是悄悄跳过去', (tester) async {
+    final (tmp, controller) = await buildController(tester, bills: [
+      sample('a', 6650),
+      sample('b', 1000),
+    ]);
+    await tester.pumpWidget(WxBillsApp(controller: controller));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField).first, '99');
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('定位'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('已跳到最接近的 ¥66.50'), findsOneWidget,
+        reason: '跳到最接近的一张必须说出来，否则又变成「点了没反应」');
+
+    await tester.pump(const Duration(seconds: 5)); // 闪烁 + SnackBar 定时器
+    await tester.pumpAndSettle();
+    await cleanup(tester, tmp);
+  });
+
   testWidgets('点记录打开编辑框，保存后金额与「手动」标记更新', (tester) async {
     final (tmp, controller) = await buildController(tester, bills: [sample('a', 1050)]);
     await tester.pumpWidget(WxBillsApp(controller: controller));

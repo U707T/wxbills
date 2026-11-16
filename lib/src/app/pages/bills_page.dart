@@ -223,6 +223,10 @@ class _BillsPageState extends State<BillsPage> {
       if (at == 0) return c.totalCount == 0 ? '还没扫描过' : '未记录扫描时间';
       return '上次扫描 ${_ago(at)}';
     }
+    // 金额一个都没命中时列表是全量的（为了「定位」还能跳到最接近的一张），
+    // 必须说清「不是没反应，是这个金额没有」，否则用户只会以为搜索框坏了。
+    final miss = c.queryNote;
+    if (miss.isNotEmpty) return '$miss，显示全部 ${c.totalCount} 张';
     return '当前 ${c.visibleBills.length} 张 · ¥${Bill.formatCents(c.visibleSumCents)}';
   }
 
@@ -416,6 +420,8 @@ class _BillsPageState extends State<BillsPage> {
   }
 
   Widget _toolbar({required bool narrow}) {
+    // 金额没命中时（列表退回全量）把这行提示染成琥珀色：它此刻是唯一的反馈
+    final miss = c.query.trim().isNotEmpty && c.queryNote.isNotEmpty;
     final hint = Text(
       _toolbarHint(),
       maxLines: 1,
@@ -423,9 +429,11 @@ class _BillsPageState extends State<BillsPage> {
       textAlign: narrow ? TextAlign.left : TextAlign.right,
       style: TextStyle(
         fontSize: narrow ? 10.5 : 11.5,
-        color: Theme.of(context).brightness == Brightness.dark
-            ? Palette.darkTextDim
-            : Palette.textDim,
+        color: miss
+            ? Palette.amber
+            : Theme.of(context).brightness == Brightness.dark
+                ? Palette.darkTextDim
+                : Palette.textDim,
       ),
     );
     return ContentWidth(
@@ -443,7 +451,7 @@ class _BillsPageState extends State<BillsPage> {
                     onSubmitted: (_) => _locate(),
                     style: const TextStyle(fontSize: 13.5),
                     decoration: InputDecoration(
-                      hintText: narrow ? '输入金额定位' : '输入金额快速定位，如 31.5',
+                      hintText: narrow ? '输入金额定位' : '输入金额定位，如 66 或 66.5',
                       prefixIcon: const Icon(Icons.search, size: 18),
                       suffixIcon: _searchCtrl.text.isEmpty
                           ? null

@@ -10,6 +10,7 @@ import '../data/copy_plan.dart';
 import '../data/scanner.dart';
 import '../data/store.dart';
 import '../model/bill.dart';
+import '../model/bill_query.dart';
 import '../platform/photo_source.dart';
 import '../platform/window_shell.dart';
 import '../webdav/sync.dart';
@@ -126,6 +127,10 @@ class AppController extends ChangeNotifier {
   SortMode? _visibleCacheSort;
   int _visibleSumCache = 0;
 
+  /// 金额查询一个都没命中时的说明（「没有 ¥66 的记录」），正常为空串。
+  /// 见 [BillQuery.missHint]：这时列表**不筛窄**，否则「定位」就没得跳了。
+  String _queryNote = '';
+
   /// 扫描进度通知节流：一张图一次 notifyListeners 会让整页重建几百次，
   /// 进度条根本看不出区别，却把主线程占满（列表滚动会明显卡）。
   DateTime _lastProgressNotify = DateTime.fromMillisecondsSinceEpoch(0);
@@ -199,21 +204,17 @@ class AppController extends ChangeNotifier {
 
     final q = _query.trim();
     var list = store.liveBills;
+    _queryNote = '';
 
     if (q.isNotEmpty) {
-      final cents = Bill.parseYuan(q);
-      if (cents != null) {
-        // 输入的是金额：只保留完全相同的记录；一个都没有时保留全部，
-        // 让「定位」按「最接近」跳过去——两处语义必须一致，别一个筛选一个取近。
-        final exact = list.where((b) => b.amountCents == cents).toList();
-        if (exact.isNotEmpty) list = exact;
+      final query = BillQuery(q);
+      final hits = list.where(query.matches).toList();
+      if (hits.isEmpty && query.isAmount) {
+        // 金额一个都没命中时**不筛窄**：列表筛空之后「定位」就没法跳到最接近
+        // 的那张了，改由工具条说明「没有 ¥66 的记录」（见 [queryNote]）。
+        _queryNote = query.missHint;
       } else {
-        final lower = q.toLowerCase();
-        list = list.where((b) {
-          return b.name.toLowerCase().contains(lower) ||
-              b.note.toLowerCase().contains(lower) ||
-              b.amountYuan.contains(q);
-        }).toList();
+        list = hits;
       }
     }
 
@@ -263,6 +264,12 @@ class AppController extends ChangeNotifier {
     return _visibleSumCache;
   }
 
+  /// 金额查询没命中时的提示（如「没有 ¥66 的记录」）；有命中或没查询时为空串。
+  String get queryNote {
+    _ensureVisible();
+    return _queryNote;
+  }
+
   int get totalCount => store.count;
   int get totalSumCents => store.sumCents;
 
@@ -279,13 +286,16 @@ class AppController extends ChangeNotifier {
   }
 
   /// 跳到第一个匹配项：返回目标 id（界面负责滚动 + 闪烁）。
+  ///
+  /// 金额语义与筛选完全一致（都走 [BillQuery]）：先找金额完全相同的，
+  /// 没有就取列表里最接近的——「输入 66，跳到 ¥66.5」靠的就是这一步。
   String? locateByAmount(String text) {
-    final raw = text.trim();
-    if (raw.isEmpty) {
+    final query = BillQuery(text);
+    if (query.isEmpty) {
       showToast('先输入金额，例如 31.5');
       return null;
     }
-    final target = Bill.parseYuan(raw);
+    final target = query.cents;
     if (target == null) {
       showToast('金额格式不对（最多两位小数，例如 31.5）');
       return null;
@@ -309,6 +319,12 @@ class AppController extends ChangeNotifier {
         }
       }
       hit = bestIdx;
+      // 跳到了「最接近的」就必须说出来：不说就等于「点了没反应」，
+      // 用户还会以为定位到了错的那张。
+      if (bestIdx >= 0) {
+        showToast('没有 ¥${Bill.formatCents(target)} 的记录，'
+            '已跳到最接近的 ¥${list[bestIdx].amountYuan}');
+      }
     }
     if (hit < 0) {
       showToast('没有找到金额');
