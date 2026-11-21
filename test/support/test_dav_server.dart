@@ -47,6 +47,7 @@ class TestDavServer {
 
   /// 模拟「允许写文件、但拒绝建目录」：MKCOL 一律 403。
   bool refuseMkcol = false;
+  bool refuseDelete = false;
 
   /// 置为非 0 时，接下来 N 次 PUT 会先被「别的设备」抢先写一次，
   /// 用来验证客户端会重新下载 → 重新合并 → 再写。
@@ -345,6 +346,11 @@ class TestDavServer {
   }
 
   Future<void> _delete(HttpRequest request, String path) async {
+    if (refuseDelete) {
+      request.response.statusCode = 403;
+      await request.response.close();
+      return;
+    }
     if (!files.containsKey(path)) {
       request.response.statusCode = 404;
       await request.response.close();

@@ -258,6 +258,38 @@ void main() {
     await deleteTempDirectory(dirsA.root);
   });
 
+  test('测试连接兼容不支持条件创建的 WebDAV 服务器', () async {
+    final (dirsA, a) = await newDevice('probe-no-conditional-create');
+    a.setSync(cfgFor(server, sub: ''));
+    server.rejectConditionalCreate = true;
+
+    final message = await SyncEngine(a).testConnection();
+    expect(message, contains('连接成功'));
+    expect(message, contains('可读可写'));
+    expect(message, contains('不支持安全的条件创建'));
+
+    await deleteTempDirectory(dirsA.root);
+  });
+
+  test('测试连接无法删除探针时提示远端残留', () async {
+    final (dirsA, a) = await newDevice('probe-delete-fails');
+    a.setSync(cfgFor(server, sub: ''));
+    server.refuseDelete = true;
+
+    final message = await SyncEngine(a).testConnection();
+    expect(message, contains('连接成功'));
+    expect(message, contains('未能删除'));
+    expect(
+      server.files.keys.any(
+        (path) => path.startsWith('${server.root}/.wxbills-write-test-'),
+      ),
+      isTrue,
+      reason: 'DELETE 被拒绝时要明确说明探针文件仍留在远端',
+    );
+
+    await deleteTempDirectory(dirsA.root);
+  });
+
   test('同一个「只读根」服务器：地址带上子目录就能同步成功', () async {
     server.refusePutAtRoot = true;
     final (dirsA, a) = await newDevice('a');

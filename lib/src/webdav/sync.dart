@@ -139,7 +139,8 @@ class SyncEngine {
       while (true) {
         attempt++;
         final remote = await client.get(snapshotUrl);
-        final remoteBills = _parseSnapshot(remote.bytes);
+        final parsedRemote = _parseSnapshot(remote.bytes);
+        final remoteBills = parsedRemote.bills;
 
         final localBefore = <String, Bill>{
           for (final b in store.allIncludingDeleted) b.id: b,
@@ -238,7 +239,10 @@ class SyncEngine {
             .where((id) => remoteBills.containsKey(id))
             .length;
         final needWrite =
-            remote.bytes == null || toPush > 0 || purgedOnRemote > 0;
+            remote.bytes == null ||
+            toPush > 0 ||
+            purgedOnRemote > 0 ||
+            parsedRemote.hasDevicePaths;
 
         var pushed = 0;
         if (needWrite) {
@@ -254,15 +258,38 @@ class SyncEngine {
               } on PreconditionFailedException {
                 rethrow;
               } on WebDavException catch (e) {
+                if (remote.bytes == null &&
+                    (e.status == 400 || e.status == 405 || e.status == 501)) {
+                  throw WebDavException(
+                    '${e.message}\n'
+                    '为避免覆盖其他设备的数据，未进行无条件重试；'
+                    '请使用支持 If-None-Match 条件创建的 WebDAV 服务。',
+                  );
+                }
                 if (e.status != 404 && e.status != 409) rethrow;
                 // 父目录不存在：建一次再重试（建不出来就是下面的提示）
                 await client.ensureDir(dirUrl);
-                await client.put(
-                  snapshotUrl,
-                  payload,
-                  ifMatch: remote.etag,
-                  createOnly: remote.bytes == null,
-                );
+                try {
+                  await client.put(
+                    snapshotUrl,
+                    payload,
+                    ifMatch: remote.etag,
+                    createOnly: remote.bytes == null,
+                  );
+                } on WebDavException catch (retryError) {
+                  if (remote.bytes == null &&
+                      (retryError.status == 400 ||
+                          retryError.status == 404 ||
+                          retryError.status == 405 ||
+                          retryError.status == 501)) {
+                    throw WebDavException(
+                      '${_uploadHint(retryError, client.root)}\n'
+                      '为避免覆盖其他设备的数据，未进行无条件重试；'
+                      '如果这个目录可写，服务器可能不支持安全的 If-None-Match 条件创建。',
+                    );
+                  }
+                  rethrow;
+                }
               }
             } on WebDavException catch (e) {
               if (e is PreconditionFailedException) rethrow;
@@ -361,6 +388,7 @@ class SyncEngine {
       //    坚果云的 WebDAV 根目录能读不能写；不测这一步的话，用户会先看到
       //    「路径可用」，然后同步时才炸在 404 上。
       final probeUrl = '${client.root}/.wxbills-write-test-${newId()}';
+      var conditionalCreateWarning = '';
       try {
         await client.put(
           probeUrl,
@@ -369,20 +397,38 @@ class SyncEngine {
           contentType: 'text/plain',
         );
       } on WebDavException catch (e) {
-        return _friendlyError(e, client.root, writing: true);
+        if (e.status != 400 &&
+            e.status != 404 &&
+            e.status != 405 &&
+            e.status != 501) {
+          return _friendlyError(e, client.root, writing: true);
+        }
+        // 仅对随机探针文件退回普通 PUT，以区分目录不可写和服务器不支持条件请求。
+        // 账单快照始终保持 fail-closed，绝不会在缺少并发保护时裸写。
+        try {
+          await client.put(
+            probeUrl,
+            utf8.encode('ok'),
+            contentType: 'text/plain',
+          );
+        } on WebDavException catch (writeError) {
+          return _friendlyError(writeError, client.root, writing: true);
+        }
+        conditionalCreateWarning = '（服务器不支持安全的条件创建；同步会中止以避免覆盖其他设备数据）';
       }
+      var probeCleanupWarning = '';
       try {
         await client.delete(probeUrl);
       } on WebDavException {
-        // 探针删不掉不影响结论：下次同步会用同名文件覆盖它
+        probeCleanupWarning = '（测试探针未能删除，服务器可能不支持 DELETE）';
       }
 
       final files = entries.where((e) => !e.isDirectory).toList();
       final hasSnapshot = files.any((e) => e.name == snapshotName);
       final where = '路径：${client.root}/';
       return hasSnapshot
-          ? '连接成功，路径可读可写。$where（已有远端快照，共 ${files.length} 个文件）'
-          : '连接成功，路径可读可写。$where（远端为空，首次同步会上传本机数据）';
+          ? '连接成功，路径可读可写。$where（已有远端快照，共 ${files.length} 个文件）$conditionalCreateWarning$probeCleanupWarning'
+          : '连接成功，路径可读可写。$where（远端为空，首次同步会上传本机数据）$conditionalCreateWarning$probeCleanupWarning';
     } on WebDavException catch (e) {
       return _friendlyError(e, client.root);
     } finally {
@@ -741,8 +787,12 @@ class SyncEngine {
     return Uint8List.fromList(utf8.encode(jsonEncode(json)));
   }
 
-  Map<String, Bill> _parseSnapshot(Uint8List? bytes) {
-    if (bytes == null || bytes.isEmpty) return {};
+  ({Map<String, Bill> bills, bool hasDevicePaths}) _parseSnapshot(
+    Uint8List? bytes,
+  ) {
+    if (bytes == null || bytes.isEmpty) {
+      return (bills: {}, hasDevicePaths: false);
+    }
     try {
       final decoded = jsonDecode(utf8.decode(bytes));
       // 「文件是空的」和「文件里不是本应用的数据」必须分开处理：
@@ -758,9 +808,14 @@ class SyncEngine {
         throw WebDavException('远端 bills.json 的 bills 字段不是数组，已中止以免覆盖它');
       }
       final out = <String, Bill>{};
+      var hasDevicePaths = false;
       for (final item in list) {
         if (item is! Map) {
           throw WebDavException('远端 bills.json 含有非对象账单条目，已中止以免覆盖它');
+        }
+        if ((item['p'] != null && item['p'] != '') ||
+            (item['fd'] != null && item['fd'] != '')) {
+          hasDevicePaths = true;
         }
         final bill = Bill.fromJson(Map<String, Object?>.from(item));
         if (bill.id.isEmpty) {
@@ -768,7 +823,7 @@ class SyncEngine {
         }
         out[bill.id] = bill;
       }
-      return out;
+      return (bills: out, hasDevicePaths: hasDevicePaths);
     } on WebDavException {
       rethrow;
     } catch (_) {

@@ -180,6 +180,7 @@ void main() {
 
     final result = await SyncEngine(store).run();
     expect(result.ok, isFalse, reason: '条件创建不受支持时应 fail closed');
+    expect(result.message, contains('未进行无条件重试'));
     expect(
       server.getFile('${server.root}/bills.json'),
       utf8.encode('remote concurrent content'),
@@ -273,6 +274,35 @@ void main() {
     );
 
     await dirs.root.delete(recursive: true);
+  });
+
+  test('同步时自动清理旧版远端快照中的设备路径', () async {
+    final (dirs, store) = await newDevice('redact-old-paths');
+    store.setSync(cfgFor(server));
+    final bill = makeBill(id: 'legacy-path', updatedAt: 1000);
+    store.put(bill);
+    await store.save();
+    server.putFile(
+      '${server.root}/bills.json',
+      utf8.encode(
+        jsonEncode({
+          'v': 2,
+          'savedAt': 1000,
+          'bills': [bill.toJson()],
+        }),
+      ),
+    );
+
+    final result = await SyncEngine(store).run();
+    expect(result.ok, isTrue, reason: result.message);
+    final remote = jsonDecode(
+      utf8.decode(server.getFile('${server.root}/bills.json')!),
+    ) as Map<String, dynamic>;
+    final record = (remote['bills'] as List).single as Map;
+    expect(record.containsKey('p'), isFalse);
+    expect(record.containsKey('fd'), isFalse);
+
+    await deleteTempDirectory(dirs.root);
   });
 
   test('相同更新时间但金额冲突仍可在两台设备间收敛', () async {
