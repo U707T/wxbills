@@ -9,6 +9,8 @@ import 'package:wxbills/src/data/app_dirs.dart';
 import 'package:wxbills/src/data/store.dart';
 import 'package:wxbills/src/platform/photo_source.dart';
 
+import 'support/temp_cleanup.dart';
+
 class UiSource implements PhotoSource {
   @override
   bool get supportsRefreshDate => false;
@@ -25,9 +27,10 @@ class UiSource implements PhotoSource {
   @override
   Future<bool> folderExists(String folderPath) async => true;
   @override
-  Future<List<PhotoRef>> listImages(String folderPath,
-          {String folderId = ''}) async =>
-      const [];
+  Future<List<PhotoRef>> listImages(
+    String folderPath, {
+    String folderId = '',
+  }) async => const [];
   @override
   Future<OcrImage?> loadForOcr(String path, {int maxDim = 1600}) async => null;
   @override
@@ -62,28 +65,37 @@ void main() {
     final (tmp, controller) = await build(tester);
     expect(controller.store.sync.configured, isFalse, reason: '前提：没配过同步');
 
-    await tester.pumpWidget(MaterialApp(home: SettingsPage(controller: controller)));
+    await tester.pumpWidget(
+      MaterialApp(home: SettingsPage(controller: controller)),
+    );
     await tester.pumpAndSettle();
 
     // 相当于用户按返回
     await tester.pumpWidget(const MaterialApp(home: SizedBox()));
     await tester.pumpAndSettle();
 
-    expect(controller.store.sync.configured, isFalse,
-        reason: '什么都没改就退出，不该把默认地址保存成「已配置」并开始自动同步');
+    expect(
+      controller.store.sync.configured,
+      isFalse,
+      reason: '什么都没改就退出，不该把默认地址保存成「已配置」并开始自动同步',
+    );
     expect(controller.store.sync.autoSync, isTrue);
 
-    await tester.runAsync(() => tmp.delete(recursive: true));
+    await tester.runAsync(() => deleteTempDirectory(tmp));
   });
 
-  testWidgets('改了地址再返回：照常保存（dirty 标记不能把正常保存也挡掉）',
-      (tester) async {
+  testWidgets('改了地址再返回：照常保存（dirty 标记不能把正常保存也挡掉）', (tester) async {
     final (tmp, controller) = await build(tester);
 
-    await tester.pumpWidget(MaterialApp(home: SettingsPage(controller: controller)));
+    await tester.pumpWidget(
+      MaterialApp(home: SettingsPage(controller: controller)),
+    );
     await tester.pumpAndSettle();
 
-    await tester.enterText(find.byType(TextField).first, 'https://dav.example.com/x');
+    await tester.enterText(
+      find.byType(TextField).first,
+      'https://dav.example.com/x',
+    );
     await tester.pumpAndSettle();
 
     await tester.pumpWidget(const MaterialApp(home: SizedBox()));
@@ -92,6 +104,6 @@ void main() {
     expect(controller.store.sync.url, 'https://dav.example.com/x');
     expect(controller.store.sync.configured, isTrue);
 
-    await tester.runAsync(() => tmp.delete(recursive: true));
+    await tester.runAsync(() => deleteTempDirectory(tmp));
   });
 }

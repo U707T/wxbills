@@ -7,6 +7,8 @@ import 'package:wxbills/src/data/scanner.dart';
 import 'package:wxbills/src/data/store.dart';
 import 'package:wxbills/src/platform/photo_source.dart';
 
+import 'support/temp_cleanup.dart';
+
 /// 可控的图片源：第一次「读不出来」，之后能读出来 / 或一直读不出来。
 class FlakySource implements PhotoSource {
   FlakySource(this.paths);
@@ -43,11 +45,20 @@ class FlakySource implements PhotoSource {
   Future<bool> folderExists(String folderPath) async => true;
 
   @override
-  Future<List<PhotoRef>> listImages(String folderPath, {String folderId = ''}) async => [
-        for (final p in paths)
-          // modified 恒为 0：模拟 Android SAF 拿不到 lastModified 的情况
-          PhotoRef(path: p, name: p.split('/').last, modified: 0, size: 1, folderId: folderId),
-      ];
+  Future<List<PhotoRef>> listImages(
+    String folderPath, {
+    String folderId = '',
+  }) async => [
+    for (final p in paths)
+      // modified 恒为 0：模拟 Android SAF 拿不到 lastModified 的情况
+      PhotoRef(
+        path: p,
+        name: p.split('/').last,
+        modified: 0,
+        size: 1,
+        folderId: folderId,
+      ),
+  ];
 
   @override
   Future<OcrImage?> loadForOcr(String path, {int maxDim = 1600}) async {
@@ -95,7 +106,7 @@ void main() {
     expect(second.loadFailed, 0);
     expect(second.retried, 1, reason: '未识别的记录应该被重新走一遍识别流程');
 
-    await tmp.delete(recursive: true);
+    await deleteTempDirectory(tmp);
   });
 
   test('静默启动扫描不重试未识别记录（避免每次开机都全量重算）', () async {
@@ -107,7 +118,7 @@ void main() {
     final boot = await scanner.scanAll(retryUnrecognized: false);
     expect(boot.retried, 0, reason: '启动时的静默扫描应该只做增量');
 
-    await tmp.delete(recursive: true);
+    await deleteTempDirectory(tmp);
   });
 
   test('手工填过金额的记录不会被「重新识别」动到', () async {
@@ -123,6 +134,6 @@ void main() {
     await scanner.scanAll(retryUnrecognized: true, forceRecheck: true);
     expect(store.byId(id)!.amountCents, 2450, reason: '手工金额优先，重识别不能覆盖');
 
-    await tmp.delete(recursive: true);
+    await deleteTempDirectory(tmp);
   });
 }

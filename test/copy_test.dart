@@ -11,6 +11,7 @@ import 'package:wxbills/src/model/bill.dart';
 import 'package:wxbills/src/platform/photo_source.dart';
 import 'package:wxbills/src/webdav/sync.dart';
 
+import 'support/temp_cleanup.dart';
 import 'support/test_dav_server.dart';
 
 /// 桌面端剪贴板替身：只接受**真实存在**的文件，和 Windows 实现一致。
@@ -154,8 +155,8 @@ void main() {
     expect(controller.toast, isNot(contains('失败')));
 
     await server.stop();
-    await phoneTmp.delete(recursive: true);
-    await pcTmp.delete(recursive: true);
+    await deleteTempDirectory(phoneTmp);
+    await deleteTempDirectory(pcTmp);
   });
 
   test('原图就在本机：复制原图，不生成缩略图副本', () async {
@@ -174,7 +175,7 @@ void main() {
     expect(dirs.copyDir.existsSync(), isFalse, reason: '用不上副本就别建目录');
     expect(controller.toast, contains('已复制图片'));
 
-    await tmp.delete(recursive: true);
+    await deleteTempDirectory(tmp);
   });
 
   test('原图和缩略图都没有：给出准确原因，不再误报「原图被移动或删除」', () async {
@@ -196,7 +197,7 @@ void main() {
     await controller.copyImage(makeBill(path: ''));
     expect(controller.toast, contains('先同步一次'));
 
-    await tmp.delete(recursive: true);
+    await deleteTempDirectory(tmp);
   });
 
   test('剪贴板被占用：说清是剪贴板的问题，不甩锅给原图', () async {
@@ -211,7 +212,7 @@ void main() {
     expect(controller.toast, contains('重试'));
     expect(controller.toast, isNot(contains('被移动')));
 
-    await tmp.delete(recursive: true);
+    await deleteTempDirectory(tmp);
   });
 
   test('同名不同图：不覆盖上一次复制的文件（可能还没粘贴）', () async {
@@ -233,7 +234,7 @@ void main() {
     final again = resolveCopyPlan(makeBill(thumb: 'a.jpg'), dirs);
     expect(again.path, first.path);
 
-    await tmp.delete(recursive: true);
+    await deleteTempDirectory(tmp);
   });
 
   test('剪贴板文件名按 Windows 规则清洗', () {

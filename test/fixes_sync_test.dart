@@ -11,6 +11,7 @@ import 'package:wxbills/src/model/bill.dart';
 import 'package:wxbills/src/platform/photo_source.dart';
 import 'package:wxbills/src/webdav/sync.dart';
 
+import 'support/temp_cleanup.dart';
 import 'support/test_dav_server.dart';
 
 /// 只实现同步真正用到的两件事：读原图（可挂起）与读原图大小。
@@ -142,7 +143,7 @@ void main() {
       reason: '上传原图用的是同步开始时的旧快照，不能用它覆盖墓碑',
     );
 
-    await dirs.root.delete(recursive: true);
+    await deleteTempDirectory(dirs.root);
   });
 
   test('同步上传原图期间手改的金额，不会被旧快照覆盖', () async {
@@ -173,7 +174,7 @@ void main() {
       reason: '同步只该补 photo 字段，不能把金额与 manual 标记一起写回旧值',
     );
 
-    await dirs.root.delete(recursive: true);
+    await deleteTempDirectory(dirs.root);
   });
 
   test('两端缩略图长度不同：以远端为准收敛，不会每轮互相覆盖', () async {
@@ -201,8 +202,8 @@ void main() {
     final ra = await SyncEngine(a).run();
     expect(ra.thumbsUp, 0, reason: '收敛之后再同步不该产生任何上传');
 
-    await dirsA.root.delete(recursive: true);
-    await dirsB.root.delete(recursive: true);
+    await deleteTempDirectory(dirsA.root);
+    await deleteTempDirectory(dirsB.root);
   });
 
   test('过期墓碑随合并结果一起清掉，不会同步一次又回来', () async {
@@ -228,7 +229,7 @@ void main() {
     final raw = utf8.decode(server.getFile('${server.root}/bills.json')!);
     expect(raw, isNot(contains('"dead"')), reason: '远端快照也要一起变小，否则下次同步又会合并回来');
 
-    await dirs.root.delete(recursive: true);
+    await deleteTempDirectory(dirs.root);
   });
 
   test('远端设备路径不会被本机当作原图读取或上传', () async {
@@ -257,7 +258,7 @@ void main() {
     expect(originalReads, 0, reason: '远端给出的路径不可传入本机文件读取接口');
     expect(server.getFile('${server.root}/photos/remote-path.png'), isNull);
 
-    await dirs.root.delete(recursive: true);
+    await deleteTempDirectory(dirs.root);
   });
 
   test('远端 bills.json 结构不对：中止同步，不覆盖它', () async {
@@ -274,7 +275,7 @@ void main() {
       reason: '不认识的内容一律不覆盖',
     );
 
-    await dirs.root.delete(recursive: true);
+    await deleteTempDirectory(dirs.root);
   });
 
   test('没有导入文件夹时，启动仍会执行一次自动同步', () async {
@@ -302,6 +303,6 @@ void main() {
       reason: '「没有相册目录」只该跳过扫描，不该连同步一起跳过',
     );
 
-    await dirs.root.delete(recursive: true);
+    await deleteTempDirectory(dirs.root);
   });
 }

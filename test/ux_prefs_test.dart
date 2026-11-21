@@ -7,6 +7,8 @@ import 'package:wxbills/src/data/app_dirs.dart';
 import 'package:wxbills/src/data/store.dart';
 import 'package:wxbills/src/platform/photo_source.dart';
 
+import 'support/temp_cleanup.dart';
+
 /// 只数「列目录被调用了几次」的图片源。
 class CountingSource implements PhotoSource {
   CountingSource(this.paths);
@@ -25,6 +27,7 @@ class CountingSource implements PhotoSource {
   Future<int?> originalLength(String path) async => null;
   @override
   Future<bool> copyImage(String path) async => false;
+
   /// 同步上传原图用：测试替身不参与原图同步
   @override
   Future<Uint8List?> readOriginal(String path) async => null;
@@ -36,7 +39,10 @@ class CountingSource implements PhotoSource {
   @override
   Future<bool> folderExists(String folderPath) async => true;
   @override
-  Future<List<PhotoRef>> listImages(String folderPath, {String folderId = ''}) async {
+  Future<List<PhotoRef>> listImages(
+    String folderPath, {
+    String folderId = '',
+  }) async {
     listCalls++;
     return [
       for (final p in paths)
@@ -53,7 +59,8 @@ class CountingSource implements PhotoSource {
   @override
   Future<OcrImage?> loadForOcr(String path, {int maxDim = 1600}) async => null;
   @override
-  Future<Uint8List?> makeThumbBytes(String path, {int maxDim = 256}) async => null;
+  Future<Uint8List?> makeThumbBytes(String path, {int maxDim = 256}) async =>
+      null;
   @override
   Future<RefreshOutcome> refreshDate(String path, String? folderPath) async =>
       const RefreshOutcome(ok: false);
@@ -80,7 +87,7 @@ Future<(Directory, AppDirs, BillStore, CountingSource)> setup({
 Future<void> _cleanup(Directory tmp) async {
   await Future<void>.delayed(const Duration(milliseconds: 50));
   try {
-    await tmp.delete(recursive: true);
+    await deleteTempDirectory(tmp);
   } catch (_) {}
 }
 
