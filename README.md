@@ -89,11 +89,7 @@
   时间相同则「有金额 > 无金额」「手动 > 自动」，最终结果与合并顺序无关。
 - **删除是墓碑，且删除优先**：`deleted=1` 也会同步；合并时先看删除，
   「A 删除、B 修改」一定收敛到已删除，不会复活。扫描也不会把用户删掉的记录重新捡回来。
-- **设备私有字段不合并**：`path` / `folder` 是本机定位，
-  从另一台设备同步来的记录不会被本机的路径覆盖，也不会被本机扫描误判为「已删除」。
-  这些记录在本机的原图来自 `photos/`（下载到 `<support>/media/`）；
-  桌面端「复制图片」按「本机原图 → 同步下来的原图 → 缩略图」取，
-  不会出现「列表里看得见图、点复制却失败」。
+- **设备私有字段**：`path` / `folder` 是本机定位；远端独有记录不会导入另一台设备的路径，避免误读本机文件或被扫描误判为删除。换设备后原图来自 `photos/`（下载到 `<support>/media/`）；桌面端「复制图片」按「本机原图 → 同步原图 → 缩略图」取。
 
 ## 开发
 
@@ -101,7 +97,7 @@
 export PATH=/opt/flutter/bin:$PATH
 flutter pub get
 flutter analyze
-flutter test                      # 113 项：OCR 回归 / 同步端到端 / 原图同步 / 复制图片 / 存储 / 扫描 / UI / 窗口开关
+flutter test                      # 全量 OCR / 同步 / 存储 / 扫描 / UI / 窗口回归测试
 # 贴边隐藏的几何单测（纯 C++，不依赖 Flutter 和 Windows）
 g++ -std=c++17 -Wall -Wextra -Werror windows/runner/dock_math_test.cpp -o /tmp/dock_math_test && /tmp/dock_math_test
 flutter build apk --debug --target-platform=android-arm64

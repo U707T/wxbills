@@ -103,7 +103,9 @@ class Bill {
       id: id,
       name: name ?? this.name,
       path: path ?? this.path,
-      amountCents: amountCents == _sentinel ? this.amountCents : amountCents as int?,
+      amountCents: amountCents == _sentinel
+          ? this.amountCents
+          : amountCents as int?,
       confidence: confidence ?? this.confidence,
       manual: manual ?? this.manual,
       fileModified: fileModified ?? this.fileModified,
@@ -119,28 +121,31 @@ class Bill {
 
   /// 序列化（键名刻意短：一次同步要传几百条记录）。
   Map<String, Object?> toJson() => {
-        'id': id,
-        'n': name,
-        'p': path,
-        'a': amountCents,
-        'c': confidence,
-        'm': manual ? 1 : 0,
-        'fm': fileModified,
-        'ia': importedAt,
-        'u': updatedAt,
-        'nt': note,
-        'fd': folder,
-        'd': deleted ? 1 : 0,
-        't': thumb,
-        'ph': photo,
-      };
+    'id': id,
+    'n': name,
+    'p': path,
+    'a': amountCents,
+    'c': confidence,
+    'm': manual ? 1 : 0,
+    'fm': fileModified,
+    'ia': importedAt,
+    'u': updatedAt,
+    'nt': note,
+    'fd': folder,
+    'd': deleted ? 1 : 0,
+    't': thumb,
+    'ph': photo,
+  };
 
   /// 只接受 `<id>.<ext>` / `<id>.jpg` 这种纯文件名的形态。
   ///
   /// 记录是从网盘下载的 JSON，`t` / `ph` 会被直接拿去拼本机路径
   /// （`thumbs/…`、`media/…`）。放一个 `../../…` 进来就能写到应用目录之外，
   /// 所以在这里就把不像文件名的值丢掉，宁可显示占位图。
-  static final RegExp _safeFileName = RegExp(r'^[A-Za-z0-9_-]{1,64}\.[A-Za-z0-9]{1,5}$');
+  static final RegExp _safeId = RegExp(r'^[A-Za-z0-9_-]{1,64}$');
+  static final RegExp _safeFileName = RegExp(
+    r'^[A-Za-z0-9_-]{1,64}\.[A-Za-z0-9]{1,5}$',
+  );
 
   static String _fileNameOrEmpty(Object? raw) {
     final name = '${raw ?? ''}';
@@ -148,9 +153,10 @@ class Bill {
   }
 
   static Bill fromJson(Map<String, Object?> j) {
+    final rawId = '${j['id'] ?? ''}';
     final a = j['a'];
     return Bill(
-      id: '${j['id'] ?? ''}',
+      id: _safeId.hasMatch(rawId) ? rawId : '',
       name: '${j['n'] ?? ''}',
       path: '${j['p'] ?? ''}',
       amountCents: a is num ? a.toInt() : null,
@@ -178,9 +184,7 @@ class Bill {
     final v = cents.abs();
     final yuan = v ~/ 100;
     final fen = v % 100;
-    final body = fen == 0
-        ? '$yuan'
-        : '$yuan.${fen < 10 ? '0$fen' : '$fen'}';
+    final body = fen == 0 ? '$yuan' : '$yuan.${fen < 10 ? '0$fen' : '$fen'}';
     return neg ? '-$body' : body;
   }
 
@@ -196,7 +200,9 @@ class Bill {
 
   /// 只接受「1 / 1.5 / 12.34」这类金额文本，最多 7 位整数 + 2 位小数。
   /// 挡住 `1e3`、`NaN`（`double.tryParse('NaN')` 会成功并让 `.round()` 抛异常）。
-  static final RegExp _yuanPattern = RegExp(r'^(?:\d{1,7}(?:\.\d{1,2})?|\.\d{1,2})$');
+  static final RegExp _yuanPattern = RegExp(
+    r'^(?:\d{1,7}(?:\.\d{1,2})?|\.\d{1,2})$',
+  );
 
   /// 元文本 → 分。非法返回 null。
   static int? parseYuan(String text) {
@@ -233,8 +239,23 @@ Bill mergeBill(Bill local, Bill remote) {
   if (local.note.length != remote.note.length) {
     return remote.note.length > local.note.length ? remote : local;
   }
-  // 完全平手：用 id 之外的稳定字段做最终裁决，保证两端一致
-  return local.name.compareTo(remote.name) <= 0 ? local : remote;
+  // 完全平手：用 id 之外的共享字段做字典序裁决，保证两端独立操作后仍收敛。
+  // path / folder 是设备私有字段，不能进入裁决，否则两台设备会得到不同赢家。
+  var order = local.name.compareTo(remote.name);
+  order = order == 0
+      ? (local.amountCents == null
+            ? 0
+            : local.amountCents!.compareTo(remote.amountCents!))
+      : order;
+  order = order == 0 ? local.confidence.compareTo(remote.confidence) : order;
+  order = order == 0
+      ? local.fileModified.compareTo(remote.fileModified)
+      : order;
+  order = order == 0 ? local.importedAt.compareTo(remote.importedAt) : order;
+  order = order == 0 ? local.note.compareTo(remote.note) : order;
+  order = order == 0 ? local.thumb.compareTo(remote.thumb) : order;
+  order = order == 0 ? local.photo.compareTo(remote.photo) : order;
+  return order <= 0 ? local : remote;
 }
 
 /// 生成随机 id（16 字节 hex），不引入额外依赖。

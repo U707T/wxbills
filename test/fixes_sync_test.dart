@@ -36,9 +36,10 @@ class SyncSource implements PhotoSource {
   @override
   Future<bool> folderExists(String folderPath) async => true;
   @override
-  Future<List<PhotoRef>> listImages(String folderPath,
-          {String folderId = ''}) async =>
-      const [];
+  Future<List<PhotoRef>> listImages(
+    String folderPath, {
+    String folderId = '',
+  }) async => const [];
   @override
   Future<OcrImage?> loadForOcr(String path, {int maxDim = 1600}) async => null;
   @override
@@ -61,11 +62,11 @@ class SyncSource implements PhotoSource {
 }
 
 SyncConfig cfgFor(TestDavServer s) => SyncConfig(
-      url: s.url,
-      username: 'alice',
-      password: 'secret',
-      autoSync: false,
-    );
+  url: s.url,
+  username: 'alice',
+  password: 'secret',
+  autoSync: false,
+);
 
 Future<(AppDirs, BillStore)> newDevice(String label, TestDavServer s) async {
   final tmp = await Directory.systemTemp.createTemp('wxbills_fix_$label');
@@ -86,21 +87,20 @@ Bill makeBill({
   String photo = '',
   String name = 'a.png',
   String path = '',
-}) =>
-    Bill(
-      id: id,
-      name: name,
-      path: path,
-      amountCents: cents,
-      confidence: deleted ? 0 : 1,
-      manual: false,
-      fileModified: 1,
-      importedAt: 1,
-      updatedAt: updatedAt,
-      deleted: deleted,
-      thumb: thumb,
-      photo: photo,
-    );
+}) => Bill(
+  id: id,
+  name: name,
+  path: path,
+  amountCents: cents,
+  confidence: deleted ? 0 : 1,
+  manual: false,
+  fileModified: 1,
+  importedAt: 1,
+  updatedAt: updatedAt,
+  deleted: deleted,
+  thumb: thumb,
+  photo: photo,
+);
 
 void main() {
   late TestDavServer server;
@@ -136,8 +136,11 @@ void main() {
     source.gate!.complete();
     await running;
 
-    expect(store.byId('aaaa')!.deleted, isTrue,
-        reason: '上传原图用的是同步开始时的旧快照，不能用它覆盖墓碑');
+    expect(
+      store.byId('aaaa')!.deleted,
+      isTrue,
+      reason: '上传原图用的是同步开始时的旧快照，不能用它覆盖墓碑',
+    );
 
     await dirs.root.delete(recursive: true);
   });
@@ -164,8 +167,11 @@ void main() {
     await running;
 
     expect(store.byId('bbbb')!.amountCents, 8888);
-    expect(store.byId('bbbb')!.manual, isTrue,
-        reason: '同步只该补 photo 字段，不能把金额与 manual 标记一起写回旧值');
+    expect(
+      store.byId('bbbb')!.manual,
+      isTrue,
+      reason: '同步只该补 photo 字段，不能把金额与 manual 标记一起写回旧值',
+    );
 
     await dirs.root.delete(recursive: true);
   });
@@ -186,8 +192,11 @@ void main() {
 
     final rb = await SyncEngine(b).run();
     expect(rb.thumbsUp, 0, reason: '远端已有就该以远端为准，不要互相覆盖');
-    expect((await b.readThumb('t1.jpg'))!.length, 100,
-        reason: '下载远端版本，两边才会一轮收敛');
+    expect(
+      (await b.readThumb('t1.jpg'))!.length,
+      100,
+      reason: '下载远端版本，两边才会一轮收敛',
+    );
 
     final ra = await SyncEngine(a).run();
     expect(ra.thumbsUp, 0, reason: '收敛之后再同步不该产生任何上传');
@@ -203,11 +212,13 @@ void main() {
     final tomb = makeBill(id: 'dead', deleted: true, updatedAt: old);
     server.putFile(
       '${server.root}/bills.json',
-      utf8.encode(jsonEncode({
-        'v': 2,
-        'savedAt': old,
-        'bills': [tomb.toJson()],
-      })),
+      utf8.encode(
+        jsonEncode({
+          'v': 2,
+          'savedAt': old,
+          'bills': [tomb.toJson()],
+        }),
+      ),
     );
 
     final r = await SyncEngine(store).run();
@@ -215,8 +226,36 @@ void main() {
     expect(store.byId('dead'), isNull, reason: '过期墓碑不该被合并回本机');
 
     final raw = utf8.decode(server.getFile('${server.root}/bills.json')!);
-    expect(raw, isNot(contains('"dead"')),
-        reason: '远端快照也要一起变小，否则下次同步又会合并回来');
+    expect(raw, isNot(contains('"dead"')), reason: '远端快照也要一起变小，否则下次同步又会合并回来');
+
+    await dirs.root.delete(recursive: true);
+  });
+
+  test('远端设备路径不会被本机当作原图读取或上传', () async {
+    final (dirs, store) = await newDevice('foreign-path', server);
+    final remote = makeBill(
+      id: 'remote-path',
+      updatedAt: 1000,
+    ).copyWith(path: '../../private.png', folder: 'foreign-folder');
+    server.putFile(
+      '${server.root}/bills.json',
+      utf8.encode(
+        jsonEncode({
+          'v': 2,
+          'savedAt': 1000,
+          'bills': [remote.toJson()],
+        }),
+      ),
+    );
+    var originalReads = 0;
+    final source = SyncSource(onReadOriginal: () => originalReads++);
+
+    final result = await SyncEngine(store, source: source).run();
+    expect(result.ok, isTrue, reason: result.message);
+    expect(store.byId('remote-path')!.path, isEmpty);
+    expect(store.byId('remote-path')!.folder, isEmpty);
+    expect(originalReads, 0, reason: '远端给出的路径不可传入本机文件读取接口');
+    expect(server.getFile('${server.root}/photos/remote-path.png'), isNull);
 
     await dirs.root.delete(recursive: true);
   });
@@ -229,28 +268,39 @@ void main() {
     final r = await SyncEngine(store).run();
     expect(r.ok, isFalse);
     expect(r.message, contains('格式'), reason: r.message);
-    expect(utf8.decode(server.getFile('${server.root}/bills.json')!), raw,
-        reason: '不认识的内容一律不覆盖');
+    expect(
+      utf8.decode(server.getFile('${server.root}/bills.json')!),
+      raw,
+      reason: '不认识的内容一律不覆盖',
+    );
 
     await dirs.root.delete(recursive: true);
   });
 
   test('没有导入文件夹时，启动仍会执行一次自动同步', () async {
     final (dirs, store) = await newDevice('boot', server);
-    store.setSync(SyncConfig(
-      url: server.url,
-      username: 'alice',
-      password: 'secret',
-      autoSync: true,
-    ));
+    store.setSync(
+      SyncConfig(
+        url: server.url,
+        username: 'alice',
+        password: 'secret',
+        autoSync: true,
+      ),
+    );
     await store.save();
 
-    final controller =
-        AppController(dirs: dirs, store: store, source: SyncSource());
+    final controller = AppController(
+      dirs: dirs,
+      store: store,
+      source: SyncSource(),
+    );
     await controller.init();
 
-    expect(server.getFile('${server.root}/bills.json'), isNotNull,
-        reason: '「没有相册目录」只该跳过扫描，不该连同步一起跳过');
+    expect(
+      server.getFile('${server.root}/bills.json'),
+      isNotNull,
+      reason: '「没有相册目录」只该跳过扫描，不该连同步一起跳过',
+    );
 
     await dirs.root.delete(recursive: true);
   });

@@ -5,6 +5,8 @@ import 'package:wxbills/src/data/app_dirs.dart';
 import 'package:wxbills/src/data/store.dart';
 import 'package:wxbills/src/model/bill.dart';
 
+import 'support/temp_cleanup.dart';
+
 Future<(Directory, AppDirs, BillStore)> newStore() async {
   final tmp = await Directory.systemTemp.createTemp('wxbills_store');
   final dirs = AppDirs(tmp);
@@ -23,21 +25,20 @@ Bill bill({
   String thumb = '',
   int updatedAt = 1000,
   int fileModified = 1000,
-}) =>
-    Bill(
-      id: id,
-      name: '$id.png',
-      path: '/p/$id.png',
-      amountCents: cents,
-      confidence: manual ? 1 : 0.9,
-      manual: manual,
-      fileModified: fileModified,
-      importedAt: updatedAt,
-      updatedAt: updatedAt,
-      note: note,
-      deleted: deleted,
-      thumb: thumb,
-    );
+}) => Bill(
+  id: id,
+  name: '$id.png',
+  path: '/p/$id.png',
+  amountCents: cents,
+  confidence: manual ? 1 : 0.9,
+  manual: manual,
+  fileModified: fileModified,
+  importedAt: updatedAt,
+  updatedAt: updatedAt,
+  note: note,
+  deleted: deleted,
+  thumb: thumb,
+);
 
 void main() {
   group('金额格式化', () {
@@ -63,8 +64,10 @@ void main() {
       // 0.1 + 0.2 类的经典问题：必须按分取整，不能留浮点尾巴
       for (final v in ['0.07', '24.50', '31.5', '8.29', '1234.56']) {
         final cents = Bill.parseYuan(v)!;
-        expect(Bill.formatCents(cents),
-            v.contains('.') && v.split('.')[1].length == 1 ? '${v}0' : v);
+        expect(
+          Bill.formatCents(cents),
+          v.contains('.') && v.split('.')[1].length == 1 ? '${v}0' : v,
+        );
       }
     });
   });
@@ -91,9 +94,18 @@ void main() {
 
     test('合并满足交换律（两台设备独立操作也能收敛）', () {
       final cases = [
-        (bill(id: 'x', cents: 100, updatedAt: 5), bill(id: 'x', cents: 200, updatedAt: 9)),
-        (bill(id: 'x', cents: null, updatedAt: 5), bill(id: 'x', cents: 300, updatedAt: 5)),
-        (bill(id: 'x', deleted: true, updatedAt: 5), bill(id: 'x', updatedAt: 9)),
+        (
+          bill(id: 'x', cents: 100, updatedAt: 5),
+          bill(id: 'x', cents: 200, updatedAt: 5),
+        ),
+        (
+          bill(id: 'x', cents: null, updatedAt: 5),
+          bill(id: 'x', cents: 300, updatedAt: 5),
+        ),
+        (
+          bill(id: 'x', deleted: true, updatedAt: 5),
+          bill(id: 'x', updatedAt: 9),
+        ),
       ];
       for (final (l, r) in cases) {
         final a = mergeBill(l, r);
@@ -115,12 +127,14 @@ void main() {
       final (tmp, dirs, store) = await newStore();
       store.addFolder('content://tree/x', '相册');
       store.put(bill(id: 'a', cents: 2450, note: '备注', thumb: 'a.jpg'));
-      store.setSync(const SyncConfig(
-        url: 'https://dav.example.com/wxbills',
-        username: 'u',
-        password: 'p',
-        allowInsecureTls: true,
-      ));
+      store.setSync(
+        const SyncConfig(
+          url: 'https://dav.example.com/wxbills',
+          username: 'u',
+          password: 'p',
+          allowInsecureTls: true,
+        ),
+      );
       await store.save();
 
       final reopened = BillStore(dirs);
@@ -134,7 +148,7 @@ void main() {
       expect(reopened.sync.url, 'https://dav.example.com/wxbills');
       expect(reopened.sync.allowInsecureTls, isTrue);
 
-      await tmp.delete(recursive: true);
+      await deleteTempDirectory(tmp);
     });
 
     test('数据文件损坏时不崩溃，并保留现场', () async {
@@ -143,13 +157,59 @@ void main() {
       final store = BillStore(dirs);
       await store.load();
       expect(store.count, 0, reason: '坏文件应被忽略而不是抛异常');
+      expect(store.readOnly, isTrue, reason: '损坏文件不能在后续保存时被空账本覆盖');
       final backups = dirs.root
           .listSync()
           .where((e) => e.path.contains('.broken-'))
           .toList();
       expect(backups, isNotEmpty, reason: '坏文件要留一份现场供排查');
+      await store.save();
+      expect(
+        await dirs.dataFile.readAsString(),
+        '{ broken json',
+        reason: '只读模式必须保留原始损坏内容',
+      );
 
-      await tmp.delete(recursive: true);
+      await deleteTempDirectory(tmp);
+    });
+
+    test('有效 JSON 但结构异常时进入只读并保留文件', () async {
+      final (tmp, dirs, _) = await newStore();
+      const raw = '{"bills":[{"id":"a","c":"not-a-number"}]}';
+      await dirs.dataFile.writeAsString(raw);
+
+      final store = BillStore(dirs);
+      await store.load();
+      expect(store.readOnly, isTrue);
+      expect(store.count, 0, reason: '不能以部分解析的账本继续运行');
+      store.put(bill(id: 'new'));
+      await store.save();
+      expect(
+        await dirs.dataFile.readAsString(),
+        raw,
+        reason: '后续编辑或保存不能覆盖无法解析的原文件',
+      );
+
+      await deleteTempDirectory(tmp);
+    });
+
+    test('非对象 JSON 会被备份并进入只读模式', () async {
+      final (tmp, dirs, _) = await newStore();
+      const raw = '[]';
+      await dirs.dataFile.writeAsString(raw);
+
+      final store = BillStore(dirs);
+      await store.load();
+      expect(store.readOnly, isTrue);
+      expect(store.loadWarning, contains('备份'));
+      await store.save();
+      expect(await dirs.dataFile.readAsString(), raw);
+      expect(
+        dirs.root.listSync().any((e) => e.path.contains('.broken-')),
+        isTrue,
+      );
+
+      await deleteTempDirectory(tmp);
     });
 
     test('手工改金额后标记 manual，且不再被自动结果覆盖', () async {
@@ -162,7 +222,7 @@ void main() {
       expect(b.note, '客户已确认');
       expect(b.updatedAt, greaterThan(1000), reason: '改动必须刷新时间戳');
 
-      await tmp.delete(recursive: true);
+      await deleteTempDirectory(tmp);
     });
 
     test('软删除写入墓碑，列表里消失但记录仍在', () async {
@@ -173,20 +233,27 @@ void main() {
       expect(store.byId('a')!.deleted, isTrue);
       expect(store.allIncludingDeleted.length, 1);
 
-      await tmp.delete(recursive: true);
+      await deleteTempDirectory(tmp);
     });
 
     test('过期墓碑会被清理，避免同步文件无限膨胀', () async {
       final (tmp, _, store) = await newStore();
-      final old = DateTime.now().millisecondsSinceEpoch - 200 * 24 * 3600 * 1000;
+      final old =
+          DateTime.now().millisecondsSinceEpoch - 200 * 24 * 3600 * 1000;
       store.put(bill(id: 'old', deleted: true, updatedAt: old));
-      store.put(bill(id: 'new', deleted: true, updatedAt: DateTime.now().millisecondsSinceEpoch));
+      store.put(
+        bill(
+          id: 'new',
+          deleted: true,
+          updatedAt: DateTime.now().millisecondsSinceEpoch,
+        ),
+      );
       final removed = store.purgeTombstones();
       expect(removed, 1);
       expect(store.byId('old'), isNull);
       expect(store.byId('new'), isNotNull);
 
-      await tmp.delete(recursive: true);
+      await deleteTempDirectory(tmp);
     });
 
     test('缩略图写入/读取/清理', () async {
@@ -202,7 +269,7 @@ void main() {
       expect(await store.readThumb('orphan.jpg'), isNull);
       expect(await store.readThumb('a.jpg'), [1, 2, 3]);
 
-      await tmp.delete(recursive: true);
+      await deleteTempDirectory(tmp);
     });
 
     test('远端快照里的文件名不能带路径（会被拼成本机路径）', () {
@@ -210,7 +277,14 @@ void main() {
       expect(ok.thumb, 'a.jpg');
       expect(ok.photo, 'a.png');
 
-      final bad = Bill.fromJson({'id': 'a', 't': '../../evil.jpg', 'ph': '../x.png'});
+      final badId = Bill.fromJson({'id': '../../outside'});
+      expect(badId.id, isEmpty, reason: '路径型 ID 不得进入本地文件名拼接');
+
+      final bad = Bill.fromJson({
+        'id': 'a',
+        't': '../../evil.jpg',
+        'ph': '../x.png',
+      });
       expect(bad.thumb, isEmpty, reason: '带路径的名字一律丢掉，宁可不显示图');
       expect(bad.photo, isEmpty);
     });
@@ -222,10 +296,13 @@ void main() {
       final text = await dirs.dataFile.readAsString();
       expect(text.trim().startsWith('{'), isTrue);
       expect(text.trim().endsWith('}'), isTrue);
-      expect(File('${dirs.dataFile.path}.tmp').existsSync(), isFalse,
-          reason: '临时文件应已 rename 掉');
+      expect(
+        File('${dirs.dataFile.path}.tmp').existsSync(),
+        isFalse,
+        reason: '临时文件应已 rename 掉',
+      );
 
-      await tmp.delete(recursive: true);
+      await deleteTempDirectory(tmp);
     });
   });
 }

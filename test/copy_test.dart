@@ -53,9 +53,10 @@ class ClipboardSpy implements PhotoSource {
   Future<bool> folderExists(String folderPath) async => true;
 
   @override
-  Future<List<PhotoRef>> listImages(String folderPath,
-          {String folderId = ''}) async =>
-      const [];
+  Future<List<PhotoRef>> listImages(
+    String folderPath, {
+    String folderId = '',
+  }) async => const [];
 
   @override
   Future<OcrImage?> loadForOcr(String path, {int maxDim = 1600}) async => null;
@@ -74,19 +75,18 @@ Bill makeBill({
   String name = '微信图片_1.jpg',
   String path = '',
   String thumb = '',
-}) =>
-    Bill(
-      id: id,
-      name: name,
-      path: path,
-      amountCents: 2450,
-      confidence: 0.95,
-      manual: false,
-      fileModified: 1000,
-      importedAt: 1000,
-      updatedAt: 1000,
-      thumb: thumb,
-    );
+}) => Bill(
+  id: id,
+  name: name,
+  path: path,
+  amountCents: 2450,
+  confidence: 0.95,
+  manual: false,
+  fileModified: 1000,
+  importedAt: 1000,
+  updatedAt: 1000,
+  thumb: thumb,
+);
 
 Future<(Directory, AppDirs, BillStore)> newDevice(String label) async {
   final tmp = await Directory.systemTemp.createTemp('wxbills_$label');
@@ -103,45 +103,52 @@ void main() {
 
     // 手机：原图是 content://，缩略图已生成并随同步上传
     final (phoneTmp, phoneDirs, phone) = await newDevice('phone');
-    phone.setSync(SyncConfig(
-      url: server.url,
-      username: 'alice',
-      password: 'secret',
-      autoSync: false,
-    ));
-    const phonePath = 'content://com.android.externalstorage.documents/tree/a.jpg';
+    phone.setSync(
+      SyncConfig(
+        url: server.url,
+        username: 'alice',
+        password: 'secret',
+        autoSync: false,
+      ),
+    );
+    const phonePath =
+        'content://com.android.externalstorage.documents/tree/a.jpg';
     phone.put(makeBill(path: phonePath, thumb: 'b1.jpg'));
     await phone.save();
     final thumbBytes = Uint8List.fromList(
-        List<int>.generate(4096, (i) => i % 251));
+      List<int>.generate(4096, (i) => i % 251),
+    );
     await phoneDirs.thumbFile('b1.jpg').writeAsBytes(thumbBytes);
     expect((await SyncEngine(phone).run()).ok, isTrue);
 
     // PC：同步之后，列表里这条记录看得见缩略图
     final (pcTmp, pcDirs, pc) = await newDevice('pc');
-    pc.setSync(SyncConfig(
-      url: server.url,
-      username: 'alice',
-      password: 'secret',
-      autoSync: false,
-    ));
+    pc.setSync(
+      SyncConfig(
+        url: server.url,
+        username: 'alice',
+        password: 'secret',
+        autoSync: false,
+      ),
+    );
     final r = await SyncEngine(pc).run();
     expect(r.ok, isTrue, reason: r.message);
 
     final bill = pc.byId('b1')!;
-    expect(bill.path, phonePath,
-        reason: '同步来的 path 是那台设备的定位，PC 上并不存在');
+    expect(bill.path, isEmpty, reason: '同步来的记录不应保留另一台设备的本地定位');
 
     final spy = ClipboardSpy();
     final controller = AppController(dirs: pcDirs, store: pc, source: spy);
     await controller.copyImage(bill);
 
-    expect(spy.copied, hasLength(1),
-        reason: '同步来的记录也必须能复制（这正是「同步成功后复制失败」的场景）');
+    expect(spy.copied, hasLength(1), reason: '同步来的记录也必须能复制（这正是「同步成功后复制失败」的场景）');
     final copied = File(spy.copied.single);
     expect(copied.existsSync(), isTrue);
-    expect(p.basename(copied.path), '微信图片_1.jpg',
-        reason: '粘到聊天窗口时应显示原图的名字，而不是缩略图的 id');
+    expect(
+      p.basename(copied.path),
+      '微信图片_1.jpg',
+      reason: '粘到聊天窗口时应显示原图的名字，而不是缩略图的 id',
+    );
     expect(await copied.readAsBytes(), thumbBytes);
     expect(controller.toast, contains('缩略图'));
     expect(controller.toast, isNot(contains('失败')));
@@ -179,8 +186,11 @@ void main() {
     await controller.copyImage(makeBill(path: '/another/pc/a.jpg'));
     expect(spy.copied, isEmpty);
     expect(controller.toast, contains('不在这台电脑上'));
-    expect(controller.toast, contains('缩略图'),
-        reason: '要告诉用户「本机也没有缩略图」，而不是只说失败');
+    expect(
+      controller.toast,
+      contains('缩略图'),
+      reason: '要告诉用户「本机也没有缩略图」，而不是只说失败',
+    );
 
     // 连 path 都没有（远端记录，原图和缩略图都还没下下来）
     await controller.copyImage(makeBill(path: ''));

@@ -322,7 +322,16 @@ class MainActivity : FlutterActivity() {
                     "message" to "新图已建好但无法定位到 SAF 路径，已回滚（原图未改动）",
                 )
             }
-            runCatching { DocumentsContract.deleteDocument(contentResolver, uri) }
+            val oldDeleted = runCatching {
+                DocumentsContract.deleteDocument(contentResolver, uri)
+            }.getOrDefault(false)
+            if (!oldDeleted) {
+                runCatching { contentResolver.delete(inserted.first, null, null) }
+                return mapOf(
+                    "ok" to false,
+                    "message" to "新图已建好但原图无法删除，已回滚新图（原图未改动）",
+                )
+            }
             val id = findMediaId(inserted.second)
             val added = if (id != null) readDate(
                 ContentUris.withAppendedId(
@@ -402,7 +411,12 @@ class MainActivity : FlutterActivity() {
         }
 
         // 新文件写成功才删旧的（保证任何一步失败都不丢数据）
-        runCatching { DocumentsContract.deleteDocument(resolver, old) }
+        val deleted = runCatching { DocumentsContract.deleteDocument(resolver, old) }
+            .getOrDefault(false)
+        if (!deleted) {
+            runCatching { DocumentsContract.deleteDocument(resolver, target) }
+            return@runCatching null
+        }
         target
     }.getOrNull()
 

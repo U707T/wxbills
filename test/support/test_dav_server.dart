@@ -52,6 +52,10 @@ class TestDavServer {
   /// 用来验证客户端会重新下载 → 重新合并 → 再写。
   int forceConflictOnPut = 0;
 
+  /// 模拟服务端不支持 If-None-Match：可选地模拟拒绝请求前另一台设备已创建同名文件。
+  bool rejectConditionalCreate = false;
+  bool raceOnRejectedConditionalCreate = false;
+
   /// 置为 true 时所有请求返回 500（验证错误处理）。
   bool failEverything = false;
 
@@ -100,9 +104,13 @@ class TestDavServer {
 
     // Basic 认证：用户名密码固定 alice/secret
     final auth = request.headers.value(HttpHeaders.authorizationHeader);
-    if (auth == null || auth != 'Basic ${base64.encode(utf8.encode('alice:secret'))}') {
+    if (auth == null ||
+        auth != 'Basic ${base64.encode(utf8.encode('alice:secret'))}') {
       request.response.statusCode = 401;
-      request.response.headers.set(HttpHeaders.wwwAuthenticateHeader, 'Basic realm="dav"');
+      request.response.headers.set(
+        HttpHeaders.wwwAuthenticateHeader,
+        'Basic realm="dav"',
+      );
       await request.response.close();
       return;
     }
@@ -161,26 +169,42 @@ class TestDavServer {
       entries.add(key);
     }
 
-    final sb = StringBuffer('<?xml version="1.0" encoding="utf-8"?>\n<D:multistatus xmlns:D="DAV:">');
+    final sb = StringBuffer(
+      '<?xml version="1.0" encoding="utf-8"?>\n<D:multistatus xmlns:D="DAV:">',
+    );
     for (final e in entries) {
       final isDir = e.endsWith('/');
       final bytes = files[e];
-      sb.write('<D:response><D:href>${_encodePath(e)}</D:href><D:propstat><D:prop>');
-      sb.write(isDir
-          ? '<D:resourcetype><D:collection/></D:resourcetype>'
-          : '<D:resourcetype/>');
+      sb.write(
+        '<D:response><D:href>${_encodePath(e)}</D:href><D:propstat><D:prop>',
+      );
+      sb.write(
+        isDir
+            ? '<D:resourcetype><D:collection/></D:resourcetype>'
+            : '<D:resourcetype/>',
+      );
       if (!isDir) {
-        sb.write('<D:getcontentlength>${bytes?.length ?? 0}</D:getcontentlength>');
+        sb.write(
+          '<D:getcontentlength>${bytes?.length ?? 0}</D:getcontentlength>',
+        );
         final etag = etags[e];
         if (etag != null) sb.write('<D:getetag>${_emit(etag)}</D:getetag>');
       }
-      sb.write('<D:getlastmodified>Mon, 19 Oct 2026 04:00:00 GMT</D:getlastmodified>');
-      sb.write('</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>');
+      sb.write(
+        '<D:getlastmodified>Mon, 19 Oct 2026 04:00:00 GMT</D:getlastmodified>',
+      );
+      sb.write(
+        '</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>',
+      );
     }
     sb.write('</D:multistatus>');
 
     request.response.statusCode = 207;
-    request.response.headers.contentType = ContentType('application', 'xml', charset: 'utf-8');
+    request.response.headers.contentType = ContentType(
+      'application',
+      'xml',
+      charset: 'utf-8',
+    );
     request.response.write(sb.toString());
     await request.response.close();
   }
@@ -212,7 +236,9 @@ class TestDavServer {
       return;
     }
     final etag = etags[path];
-    if (etag != null) request.response.headers.set(HttpHeaders.etagHeader, etag);
+    if (etag != null) {
+      request.response.headers.set(HttpHeaders.etagHeader, etag);
+    }
     await request.response.close();
   }
 
@@ -236,14 +262,18 @@ class TestDavServer {
           : '/';
       if (parent == '$root/') {
         request.response.statusCode = 404;
-        request.response.headers.contentType =
-            ContentType('application', 'xml', charset: 'utf-8');
+        request.response.headers.contentType = ContentType(
+          'application',
+          'xml',
+          charset: 'utf-8',
+        );
         request.response.write(
-            '<?xml version="1.0" encoding="UTF-8" standalone="no"?>'
-            '<d:error xmlns:d="DAV:" xmlns:s="http://ns.jianguoyun.com">'
-            '<s:exception>ObjectNotFound</s:exception>'
-            '<s:message>The resource of this location does not exist.</s:message>'
-            '</d:error>');
+          '<?xml version="1.0" encoding="UTF-8" standalone="no"?>'
+          '<d:error xmlns:d="DAV:" xmlns:s="http://ns.jianguoyun.com">'
+          '<s:exception>ObjectNotFound</s:exception>'
+          '<s:message>The resource of this location does not exist.</s:message>'
+          '</d:error>',
+        );
         await request.response.close();
         return;
       }
@@ -262,6 +292,16 @@ class TestDavServer {
     final ifMatch = request.headers.value(HttpHeaders.ifMatchHeader);
     final ifNone = request.headers.value(HttpHeaders.ifNoneMatchHeader);
     final current = etags[path];
+
+    if (ifNone == '*' && rejectConditionalCreate) {
+      if (raceOnRejectedConditionalCreate && !files.containsKey(path)) {
+        files[path] = utf8.encode('remote concurrent content');
+        etags[path] = _nextEtag();
+      }
+      request.response.statusCode = 404;
+      await request.response.close();
+      return;
+    }
 
     if (ifNone == '*') {
       if (files.containsKey(path)) {

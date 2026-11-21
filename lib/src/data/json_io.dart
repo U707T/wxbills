@@ -19,13 +19,19 @@ Future<Map<String, dynamic>?> readJsonFile(
   try {
     if (!await file.exists()) return null;
     final text = await file.readAsString();
-    if (text.trim().isEmpty) return null;
+    if (text.trim().isEmpty) {
+      throw const FormatException('数据文件为空');
+    }
     final decoded = jsonDecode(text);
-    return decoded is Map<String, dynamic> ? decoded : null;
+    if (decoded is! Map<String, dynamic>) {
+      throw const FormatException('数据文件顶层不是对象');
+    }
+    return decoded;
   } on FormatException {
     // 坏文件不阻断启动：保留现场，并让上层把这件事告诉用户
     try {
-      final backup = '${file.path}.broken-${DateTime.now().millisecondsSinceEpoch}';
+      final backup =
+          '${file.path}.broken-${DateTime.now().millisecondsSinceEpoch}';
       await file.copy(backup);
       onCorrupt?.call(backup);
     } catch (_) {

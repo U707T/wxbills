@@ -78,7 +78,7 @@ class SyncResult {
 /// 「A 删、B 改」一定收敛到已删除，不会复活。
 class SyncEngine {
   SyncEngine(this.store, {this.deviceName = '', PhotoSource? source})
-      : _photoSource = source;
+    : _photoSource = source;
 
   final BillStore store;
   final String deviceName;
@@ -151,11 +151,9 @@ class SyncEngine {
           final l = localBefore[id];
           final r = remoteBills[id];
           if (l == null) {
-            // 远端独有：path / folder 是**那台设备**的定位，本机大概率不存在。
-            // 仍然原样存下来（两台机器用同一个同步盘、同一路径时可以直接复用），
-            // 但任何「打开本机文件」的地方都必须自己确认文件在不在——
-            // 「复制图片」就是靠这一点退到缩略图的（见 data/copy_plan.dart）。
-            merged[id] = r!;
+            // 路径 / 文件夹是设备私有字段，远端副本对本机没有意义。
+            // 清空而非照搬，避免远端快照诱导本机读取或复制任意文件。
+            merged[id] = r!.copyWith(path: '', folder: '');
             continue;
           }
           if (r == null) {
@@ -185,7 +183,9 @@ class SyncEngine {
             .where((b) => b.deleted && b.updatedAt < tombstoneCutoff)
             .map((b) => b.id)
             .toSet();
-        if (expired.isNotEmpty) merged.removeWhere((id, _) => expired.contains(id));
+        if (expired.isNotEmpty) {
+          merged.removeWhere((id, _) => expired.contains(id));
+        }
 
         // 本机被远端改动的条数（界面上的「拉取」）
         final pulled = merged.values.where((b) {
@@ -234,8 +234,9 @@ class SyncEngine {
         //  * 也不能只看「本机是否变化」—— 本机已是最终版本时（例如刚被远端合并过）
         //    同样需要把结果推上去，否则这台设备的修改永远传不出去。
         // 远端还留着已被清掉的墓碑时也要写一次，否则远端快照永远瘦不下来。
-        final purgedOnRemote =
-            expired.where((id) => remoteBills.containsKey(id)).length;
+        final purgedOnRemote = expired
+            .where((id) => remoteBills.containsKey(id))
+            .length;
         final needWrite =
             remote.bytes == null || toPush > 0 || purgedOnRemote > 0;
 
@@ -272,8 +273,7 @@ class SyncEngine {
           } on PreconditionFailedException {
             // 别人刚写过：重新下载 → 重新合并（最多 3 轮）
             if (attempt >= _maxAttempts) {
-              return SyncResult.failure(
-                  '同步冲突：其他设备一直在修改，请稍后重试');
+              return SyncResult.failure('同步冲突：其他设备一直在修改，请稍后重试');
             }
             continue;
           }
@@ -298,7 +298,8 @@ class SyncEngine {
           photosSkipped: photos.skipped,
           photosDirFlat: photosAreFlat,
           warning: _mediaWarning,
-          etagUnsafe: remote.bytes != null &&
+          etagUnsafe:
+              remote.bytes != null &&
               WebDavClient.strongEtag(remote.etag).isEmpty,
         );
         store.recordSync(now, summary, ok: true);
@@ -322,8 +323,11 @@ class SyncEngine {
         );
       }
     } on WebDavException catch (e) {
-      store.recordSync(DateTime.now().millisecondsSinceEpoch, '同步失败：${e.message}',
-          ok: false);
+      store.recordSync(
+        DateTime.now().millisecondsSinceEpoch,
+        '同步失败：${e.message}',
+        ok: false,
+      );
       await store.save();
       return SyncResult.failure(e.message);
     } catch (e) {
@@ -356,9 +360,14 @@ class SyncEngine {
       // 2) 写权限：写一个探针文件再删掉。
       //    坚果云的 WebDAV 根目录能读不能写；不测这一步的话，用户会先看到
       //    「路径可用」，然后同步时才炸在 404 上。
-      final probeUrl = '${client.root}/.wxbills-write-test';
+      final probeUrl = '${client.root}/.wxbills-write-test-${newId()}';
       try {
-        await client.put(probeUrl, utf8.encode('ok'), contentType: 'text/plain');
+        await client.put(
+          probeUrl,
+          utf8.encode('ok'),
+          createOnly: true,
+          contentType: 'text/plain',
+        );
       } on WebDavException catch (e) {
         return _friendlyError(e, client.root, writing: true);
       }
@@ -405,8 +414,11 @@ class SyncEngine {
   }
 
   /// 把状态码翻译成用户能照着做的提示（坚果云是最常见的配置场景）。
-  static String _friendlyError(WebDavException e, String root,
-      {bool writing = false}) {
+  static String _friendlyError(
+    WebDavException e,
+    String root, {
+    bool writing = false,
+  }) {
     if (writing) return _uploadHint(e, root);
     switch (e.status) {
       case 401:
@@ -519,8 +531,9 @@ class SyncEngine {
       //
       // 先问大小再读字节：超过上限的图正好是「最需要拦住的」，现在这个顺序
       // 会先把几十 MB 读进堆再拒绝，Android 上就是 OOM。
-      final knownLength =
-          b.path.isEmpty ? null : await _photoSource?.originalLength(b.path);
+      final knownLength = b.path.isEmpty
+          ? null
+          : await _photoSource?.originalLength(b.path);
       if (knownLength != null && knownLength > maxPhotoBytes) {
         skipped++;
         continue;
@@ -621,7 +634,8 @@ class SyncEngine {
       }
     } on WebDavException catch (e) {
       if (e.status != 404) {
-        _mediaWarning = '远端 $thumbsDirName 目录读取失败'
+        _mediaWarning =
+            '远端 $thumbsDirName 目录读取失败'
             '（${e.status ?? '网络错误'}），本轮跳过缩略图同步';
         return (0, 0);
       }
@@ -711,13 +725,18 @@ class SyncEngine {
   // ---------------------------------------------------------------- 快照编解码
 
   List<int> _encodeSnapshot(List<Bill> bills) {
-    // 只保留「记录本身」需要的字段：path 是本机定位，跨设备无意义，
-    // 但保留可以让另一台设备在相同路径下（例如 Windows 同步盘）直接复用。
+    // 设备私有的 path / folder 不上传：既不能跨设备定位，也会暴露本机目录与 SAF URI。
     final json = {
       'v': 2,
       'savedAt': DateTime.now().millisecondsSinceEpoch,
       'device': deviceName,
-      'bills': bills.map((b) => b.toJson()).toList(),
+      'bills': bills.map((b) {
+        final record = b.toJson();
+        record
+          ..remove('p')
+          ..remove('fd');
+        return record;
+      }).toList(),
     };
     return Uint8List.fromList(utf8.encode(jsonEncode(json)));
   }
@@ -740,9 +759,14 @@ class SyncEngine {
       }
       final out = <String, Bill>{};
       for (final item in list) {
-        if (item is! Map) continue;
+        if (item is! Map) {
+          throw WebDavException('远端 bills.json 含有非对象账单条目，已中止以免覆盖它');
+        }
         final bill = Bill.fromJson(Map<String, Object?>.from(item));
-        if (bill.id.isNotEmpty) out[bill.id] = bill;
+        if (bill.id.isEmpty) {
+          throw WebDavException('远端 bills.json 含有缺少 id 的账单条目，已中止以免覆盖它');
+        }
+        out[bill.id] = bill;
       }
       return out;
     } on WebDavException {
@@ -787,8 +811,10 @@ class SyncEngine {
     if (photosUp > 0) parts.add('上传原图 $photosUp 张');
     if (photosDown > 0) parts.add('下载原图 $photosDown 张');
     if (photosSkipped > 0) {
-      parts.add('$photosSkipped 张原图超过 '
-          '${maxPhotoBytes >> 20}MB，未同步');
+      parts.add(
+        '$photosSkipped 张原图超过 '
+        '${maxPhotoBytes >> 20}MB，未同步',
+      );
     }
     if (thumbsDirFlat) parts.add('缩略图与记录同目录（该网盘不能建子目录）');
     if (photosDirFlat && (photosUp > 0 || photosDown > 0)) {

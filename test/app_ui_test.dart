@@ -41,9 +41,10 @@ class StubPhotoSource implements PhotoSource {
   Future<bool> folderExists(String folderPath) async => true;
 
   @override
-  Future<List<PhotoRef>> listImages(String folderPath,
-          {String folderId = ''}) async =>
-      const [];
+  Future<List<PhotoRef>> listImages(
+    String folderPath, {
+    String folderId = '',
+  }) async => const [];
 
   @override
   Future<OcrImage?> loadForOcr(String path, {int maxDim = 1600}) async => null;
@@ -56,6 +57,8 @@ class StubPhotoSource implements PhotoSource {
   Future<RefreshOutcome> refreshDate(String path, String? folderPath) async =>
       const RefreshOutcome(ok: true);
 }
+
+final Map<String, AppController> _controllersByTempPath = {};
 
 /// 建一个带数据的控制器。
 ///
@@ -84,14 +87,32 @@ Future<(Directory, AppController)> buildController(
     );
     await controller.init();
   });
+  _controllersByTempPath[tmp.path] = controller;
   return (tmp, controller);
 }
 
 Future<void> cleanup(WidgetTester tester, Directory tmp) async {
-  await tester.runAsync(() => tmp.delete(recursive: true));
+  await tester.pumpWidget(const SizedBox.shrink());
+  await tester.pump();
+  final controller = _controllersByTempPath.remove(tmp.path);
+  controller?.dispose();
+  await tester.runAsync(() async {
+    FileSystemException? lastError;
+    for (var attempt = 0; attempt < 5; attempt++) {
+      try {
+        if (await tmp.exists()) await tmp.delete(recursive: true);
+        return;
+      } on FileSystemException catch (e) {
+        lastError = e;
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+    }
+    if (lastError != null) throw lastError;
+  });
 }
 
-Bill sample(String id, int cents, {String note = '', bool manual = false}) => Bill(
+Bill sample(String id, int cents, {String note = '', bool manual = false}) =>
+    Bill(
       id: id,
       name: '$id.png',
       path: '/x/$id.png',
@@ -121,11 +142,14 @@ void main() {
   });
 
   testWidgets('有数据时按金额升序展示，合计正确', (tester) async {
-    final (tmp, controller) = await buildController(tester, bills: [
-      sample('a', 3100),
-      sample('b', 1050),
-      sample('c', 2450, note: '客户A'),
-    ]);
+    final (tmp, controller) = await buildController(
+      tester,
+      bills: [
+        sample('a', 3100),
+        sample('b', 1050),
+        sample('c', 2450, note: '客户A'),
+      ],
+    );
     await tester.pumpWidget(WxBillsApp(controller: controller));
     await tester.pumpAndSettle();
 
@@ -145,10 +169,10 @@ void main() {
   });
 
   testWidgets('切换排序为金额降序后顺序反转', (tester) async {
-    final (tmp, controller) = await buildController(tester, bills: [
-      sample('a', 3100),
-      sample('b', 1050),
-    ]);
+    final (tmp, controller) = await buildController(
+      tester,
+      bills: [sample('a', 3100), sample('b', 1050)],
+    );
     await tester.pumpWidget(WxBillsApp(controller: controller));
     await tester.pumpAndSettle();
 
@@ -163,11 +187,10 @@ void main() {
   });
 
   testWidgets('搜索金额能筛选出对应记录', (tester) async {
-    final (tmp, controller) = await buildController(tester, bills: [
-      sample('a', 3100),
-      sample('b', 1050),
-      sample('c', 2450),
-    ]);
+    final (tmp, controller) = await buildController(
+      tester,
+      bills: [sample('a', 3100), sample('b', 1050), sample('c', 2450)],
+    );
     await tester.pumpWidget(WxBillsApp(controller: controller));
     await tester.pumpAndSettle();
 
@@ -181,13 +204,11 @@ void main() {
     await cleanup(tester, tmp);
   });
 
-  testWidgets('输入整数也能筛出带小数的金额（66 → 66.5，不再「没反应」）',
-      (tester) async {
-    final (tmp, controller) = await buildController(tester, bills: [
-      sample('a', 6650),
-      sample('b', 6605),
-      sample('c', 1000),
-    ]);
+  testWidgets('输入整数也能筛出带小数的金额（66 → 66.5，不再「没反应」）', (tester) async {
+    final (tmp, controller) = await buildController(
+      tester,
+      bills: [sample('a', 6650), sample('b', 6605), sample('c', 1000)],
+    );
     await tester.pumpWidget(WxBillsApp(controller: controller));
     await tester.pumpAndSettle();
 
@@ -201,12 +222,11 @@ void main() {
     await cleanup(tester, tmp);
   });
 
-  testWidgets('没有这个金额：列表不筛窄，并说明「没有 ¥99 的记录」',
-      (tester) async {
-    final (tmp, controller) = await buildController(tester, bills: [
-      sample('a', 6650),
-      sample('b', 1000),
-    ]);
+  testWidgets('没有这个金额：列表不筛窄，并说明「没有 ¥99 的记录」', (tester) async {
+    final (tmp, controller) = await buildController(
+      tester,
+      bills: [sample('a', 6650), sample('b', 1000)],
+    );
     await tester.pumpWidget(WxBillsApp(controller: controller));
     await tester.pumpAndSettle();
 
@@ -223,10 +243,10 @@ void main() {
   });
 
   testWidgets('定位到「最接近的」时会说明，不是悄悄跳过去', (tester) async {
-    final (tmp, controller) = await buildController(tester, bills: [
-      sample('a', 6650),
-      sample('b', 1000),
-    ]);
+    final (tmp, controller) = await buildController(
+      tester,
+      bills: [sample('a', 6650), sample('b', 1000)],
+    );
     await tester.pumpWidget(WxBillsApp(controller: controller));
     await tester.pumpAndSettle();
 
@@ -235,8 +255,11 @@ void main() {
     await tester.tap(find.text('定位'));
     await tester.pumpAndSettle();
 
-    expect(find.textContaining('已跳到最接近的 ¥66.50'), findsOneWidget,
-        reason: '跳到最接近的一张必须说出来，否则又变成「点了没反应」');
+    expect(
+      find.textContaining('已跳到最接近的 ¥66.50'),
+      findsOneWidget,
+      reason: '跳到最接近的一张必须说出来，否则又变成「点了没反应」',
+    );
 
     await tester.pump(const Duration(seconds: 5)); // 闪烁 + SnackBar 定时器
     await tester.pumpAndSettle();
@@ -244,7 +267,10 @@ void main() {
   });
 
   testWidgets('点记录打开编辑框，保存后金额与「手动」标记更新', (tester) async {
-    final (tmp, controller) = await buildController(tester, bills: [sample('a', 1050)]);
+    final (tmp, controller) = await buildController(
+      tester,
+      bills: [sample('a', 1050)],
+    );
     await tester.pumpWidget(WxBillsApp(controller: controller));
     await tester.pumpAndSettle();
 
@@ -282,8 +308,7 @@ void main() {
     await cleanup(tester, tmp);
   });
 
-  testWidgets('设置页（Windows）显示窗口开关，关掉贴边隐藏会写回 runner',
-      (tester) async {
+  testWidgets('设置页（Windows）显示窗口开关，关掉贴边隐藏会写回 runner', (tester) async {
     final (tmp, controller) = await buildController(tester);
 
     // 假装是 Windows，并装上 runner 那边的通道替身
@@ -309,8 +334,11 @@ void main() {
     expect(find.byIcon(Icons.vertical_align_top), findsOneWidget);
     await tester.tap(find.byIcon(Icons.vertical_align_top));
     await tester.pumpAndSettle();
-    expect(calls.where((c) => c.method == 'snapToTop'), isNotEmpty,
-        reason: '点 ⬆ 必须真的让 runner 把窗口挪到顶部');
+    expect(
+      calls.where((c) => c.method == 'snapToTop'),
+      isNotEmpty,
+      reason: '点 ⬆ 必须真的让 runner 把窗口挪到顶部',
+    );
 
     await tester.tap(find.byIcon(Icons.settings_outlined));
     await tester.pumpAndSettle();
@@ -339,8 +367,10 @@ void main() {
     expect(writes, isNotEmpty, reason: '开关必须落到 runner，否则重启就弹回来');
     expect((writes.last.arguments as Map)['edge'], isFalse);
 
-    tester.binding.defaultBinaryMessenger
-        .setMockMethodCallHandler(WindowShell.channel, null);
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      WindowShell.channel,
+      null,
+    );
     await cleanup(tester, tmp);
   });
 
@@ -364,10 +394,10 @@ void main() {
   });
 
   testWidgets('删除记录：确认后从列表移除（写入墓碑）', (tester) async {
-    final (tmp, controller) = await buildController(tester, bills: [
-      sample('a', 1050),
-      sample('b', 2450),
-    ]);
+    final (tmp, controller) = await buildController(
+      tester,
+      bills: [sample('a', 1050), sample('b', 2450)],
+    );
     await tester.pumpWidget(WxBillsApp(controller: controller));
     await tester.pumpAndSettle();
 
@@ -379,22 +409,31 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(controller.store.bills.length, 1);
-    expect(controller.store.allIncludingDeleted.length, 2,
-        reason: '删除应写墓碑而不是物理删除');
+    expect(
+      controller.store.allIncludingDeleted.length,
+      2,
+      reason: '删除应写墓碑而不是物理删除',
+    );
 
     await cleanup(tester, tmp);
   });
 
   testWidgets('提示条真的会显示（ScaffoldMessenger 挂对了地方）', (tester) async {
-    final (tmp, controller) = await buildController(tester, bills: [sample('a', 1050)]);
+    final (tmp, controller) = await buildController(
+      tester,
+      bills: [sample('a', 1050)],
+    );
     await tester.pumpWidget(WxBillsApp(controller: controller));
     await tester.pumpAndSettle();
 
     controller.showToast('已复制图片');
     await tester.pump();
 
-    expect(find.byType(SnackBar), findsOneWidget,
-        reason: '之前 context 取在 MaterialApp 之上，maybeOf 返回 null，所有提示都不显示');
+    expect(
+      find.byType(SnackBar),
+      findsOneWidget,
+      reason: '之前 context 取在 MaterialApp 之上，maybeOf 返回 null，所有提示都不显示',
+    );
     expect(find.text('已复制图片'), findsOneWidget);
 
     await tester.pump(const Duration(seconds: 4));
@@ -402,7 +441,10 @@ void main() {
   });
 
   testWidgets('「刷新日期」的说明只弹第一次，之后直接开始', (tester) async {
-    final (tmp, controller) = await buildController(tester, bills: [sample('a', 1050)]);
+    final (tmp, controller) = await buildController(
+      tester,
+      bills: [sample('a', 1050)],
+    );
     await tester.pumpWidget(WxBillsApp(controller: controller));
     await tester.pumpAndSettle();
 
@@ -420,8 +462,11 @@ void main() {
     // 第二次：不再弹说明
     await tester.tap(find.byIcon(Icons.refresh_rounded).first);
     await tester.pumpAndSettle();
-    expect(find.textContaining('刷新 1 张图片的日期'), findsNothing,
-        reason: '同一段说明每次点都弹一遍是噪音');
+    expect(
+      find.textContaining('刷新 1 张图片的日期'),
+      findsNothing,
+      reason: '同一段说明每次点都弹一遍是噪音',
+    );
 
     await cleanup(tester, tmp);
   });
@@ -432,8 +477,11 @@ void main() {
   // 最小宽度（windows/runner/win32_window.cpp 的 kMinWindowWidth），
   // 所以这里就按最窄的情况验，保证拖到底也不会出黄黑条。
 
-  Future<void> setWindowWidth(WidgetTester tester, double width,
-      {double height = 720}) async {
+  Future<void> setWindowWidth(
+    WidgetTester tester,
+    double width, {
+    double height = 720,
+  }) async {
     // 用 tester.view 而不是 binding.setSurfaceSize：MediaQuery 读的是
     // FlutterView 的「物理尺寸 / DPR」，只改 surface 传不到 MediaQuery。
     tester.view.devicePixelRatio = 1.0;
@@ -442,10 +490,13 @@ void main() {
   }
 
   testWidgets('窗口拖到最窄（360）：自动切窄布局，且不溢出', (tester) async {
-    final (tmp, controller) = await buildController(tester, bills: [
-      sample('a', 3100, note: '客户A'),
-      sample('b', 1050),
-    ]);
+    final (tmp, controller) = await buildController(
+      tester,
+      bills: [
+        sample('a', 3100, note: '客户A'),
+        sample('b', 1050),
+      ],
+    );
     // 窄布局只在桌面端生效（手机本来就是窄的，见 AppLayout）
     WindowShell.debugSupportedOverride = true;
     await setWindowWidth(tester, 360);
@@ -453,8 +504,7 @@ void main() {
     await tester.pumpWidget(WxBillsApp(controller: controller));
     await tester.pumpAndSettle();
 
-    expect(tester.takeException(), isNull,
-        reason: '最窄宽度下也不能有 RenderFlex 溢出');
+    expect(tester.takeException(), isNull, reason: '最窄宽度下也不能有 RenderFlex 溢出');
 
     // 头部：低频入口（重新识别 / 贴顶）收进「更多」，同步和设置仍是一键
     expect(find.byIcon(Icons.more_vert), findsOneWidget);
@@ -476,7 +526,10 @@ void main() {
   });
 
   testWidgets('窄窗口的「更多」菜单里能点到重新识别', (tester) async {
-    final (tmp, controller) = await buildController(tester, bills: [sample('a', 1050)]);
+    final (tmp, controller) = await buildController(
+      tester,
+      bills: [sample('a', 1050)],
+    );
     WindowShell.debugSupportedOverride = true;
     await setWindowWidth(tester, 360);
 
@@ -485,8 +538,7 @@ void main() {
 
     await tester.tap(find.byIcon(Icons.more_vert));
     await tester.pumpAndSettle();
-    expect(find.text('重新识别全部'), findsOneWidget,
-        reason: '收进菜单的入口必须真的能点到');
+    expect(find.text('重新识别全部'), findsOneWidget, reason: '收进菜单的入口必须真的能点到');
 
     // 点空白收起菜单，别把弹出的路由留到用例结束
     await tester.tapAt(const Offset(8, 600));
@@ -496,7 +548,10 @@ void main() {
   });
 
   testWidgets('窗口拉宽后恢复宽布局：四个入口直接摆出来', (tester) async {
-    final (tmp, controller) = await buildController(tester, bills: [sample('a', 1050)]);
+    final (tmp, controller) = await buildController(
+      tester,
+      bills: [sample('a', 1050)],
+    );
     WindowShell.debugSupportedOverride = true;
     await setWindowWidth(tester, 1000);
 
@@ -512,10 +567,13 @@ void main() {
   });
 
   testWidgets('中间宽度来回复位都不溢出（420 / 441 / 700）', (tester) async {
-    final (tmp, controller) = await buildController(tester, bills: [
-      sample('a', 3100, note: '客户A'),
-      sample('b', 1050),
-    ]);
+    final (tmp, controller) = await buildController(
+      tester,
+      bills: [
+        sample('a', 3100, note: '客户A'),
+        sample('b', 1050),
+      ],
+    );
     WindowShell.debugSupportedOverride = true;
     await setWindowWidth(tester, 700);
 
@@ -543,8 +601,7 @@ void main() {
     await tester.tap(find.byIcon(Icons.settings_outlined));
     await tester.pumpAndSettle();
 
-    expect(tester.takeException(), isNull,
-        reason: '窄窗口的设置页也不能溢出（三个按钮会退化成图标）');
+    expect(tester.takeException(), isNull, reason: '窄窗口的设置页也不能溢出（三个按钮会退化成图标）');
 
     // 0=服务器地址，1=用户名，2=密码：窄窗口里后两个必须竖排
     final fields = find.byType(TextField);

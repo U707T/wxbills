@@ -29,28 +29,28 @@ class SourceFolder {
   bool get isDesktopPath => !isSaf;
 
   Map<String, Object?> toJson() => {
-        'id': id,
-        'p': path,
-        'n': name,
-        'a': addedAt,
-        's': lastScanAt,
-      };
+    'id': id,
+    'p': path,
+    'n': name,
+    'a': addedAt,
+    's': lastScanAt,
+  };
 
   static SourceFolder fromJson(Map<String, Object?> j) => SourceFolder(
-        id: '${j['id'] ?? ''}',
-        path: '${j['p'] ?? ''}',
-        name: '${j['n'] ?? ''}',
-        addedAt: (j['a'] as num?)?.toInt() ?? 0,
-        lastScanAt: (j['s'] as num?)?.toInt() ?? 0,
-      );
+    id: '${j['id'] ?? ''}',
+    path: '${j['p'] ?? ''}',
+    name: '${j['n'] ?? ''}',
+    addedAt: (j['a'] as num?)?.toInt() ?? 0,
+    lastScanAt: (j['s'] as num?)?.toInt() ?? 0,
+  );
 
   SourceFolder copyWith({int? lastScanAt}) => SourceFolder(
-        id: id,
-        path: path,
-        name: name,
-        addedAt: addedAt,
-        lastScanAt: lastScanAt ?? this.lastScanAt,
-      );
+    id: id,
+    path: path,
+    name: name,
+    addedAt: addedAt,
+    lastScanAt: lastScanAt ?? this.lastScanAt,
+  );
 }
 
 /// 默认的 WebDAV 地址（坚果云）。
@@ -99,17 +99,16 @@ class SyncConfig {
     int? lastSyncAt,
     String? lastSyncMessage,
     bool? lastSyncOk,
-  }) =>
-      SyncConfig(
-        url: url ?? this.url,
-        username: username ?? this.username,
-        password: password ?? this.password,
-        allowInsecureTls: allowInsecureTls ?? this.allowInsecureTls,
-        autoSync: autoSync ?? this.autoSync,
-        lastSyncAt: lastSyncAt ?? this.lastSyncAt,
-        lastSyncMessage: lastSyncMessage ?? this.lastSyncMessage,
-        lastSyncOk: lastSyncOk ?? this.lastSyncOk,
-      );
+  }) => SyncConfig(
+    url: url ?? this.url,
+    username: username ?? this.username,
+    password: password ?? this.password,
+    allowInsecureTls: allowInsecureTls ?? this.allowInsecureTls,
+    autoSync: autoSync ?? this.autoSync,
+    lastSyncAt: lastSyncAt ?? this.lastSyncAt,
+    lastSyncMessage: lastSyncMessage ?? this.lastSyncMessage,
+    lastSyncOk: lastSyncOk ?? this.lastSyncOk,
+  );
 }
 
 /// 界面偏好：只跟「怎么显示」有关，不参与同步。
@@ -140,18 +139,18 @@ class UiPrefs {
   }
 
   UiPrefs copyWith({bool? autoScanOnBoot}) => UiPrefs(
-        seenTips: seenTips,
-        autoScanOnBoot: autoScanOnBoot ?? this.autoScanOnBoot,
-      );
+    seenTips: seenTips,
+    autoScanOnBoot: autoScanOnBoot ?? this.autoScanOnBoot,
+  );
 
   /// 清空「已看过」记录：设置页的「重新显示所有说明」用。
   UiPrefs clearTips() =>
       UiPrefs(seenTips: const <String>{}, autoScanOnBoot: autoScanOnBoot);
 
   Map<String, Object?> toJson() => {
-        'tips': seenTips.toList(),
-        'autoScan': autoScanOnBoot,
-      };
+    'tips': seenTips.toList(),
+    'autoScan': autoScanOnBoot,
+  };
 
   static UiPrefs fromJson(Map<String, Object?> j) {
     final raw = j['tips'];
@@ -239,7 +238,8 @@ class BillStore {
       _bills.values.where((b) => !b.deleted && b.amountCents == null).length;
 
   /// 需要人工核对的条数。
-  int get reviewCount => _bills.values.where((b) => !b.deleted && b.needsReview).length;
+  int get reviewCount =>
+      _bills.values.where((b) => !b.deleted && b.needsReview).length;
 
   // ---------------------------------------------------------------- 载入 / 保存
 
@@ -258,7 +258,10 @@ class BillStore {
     try {
       json = await readJsonFile(
         dirs.dataFile,
-        onCorrupt: (path) => _loadWarning = '数据文件损坏，已备份到 $path（本次以空账本启动）',
+        onCorrupt: (path) {
+          _readOnly = true;
+          _loadWarning = '数据文件损坏，已备份到 $path；已进入只读模式，本次不会覆盖原文件';
+        },
       );
     } catch (e) {
       // IO 失败（Windows 上被其他程序独占、目录权限被撤、磁盘掉线）：
@@ -266,47 +269,85 @@ class BillStore {
       // 下一次 save() 就会把原文件覆盖成空快照。
       _readOnly = true;
       _loaded = true;
-      _loadWarning = '数据文件读取失败（$e）。已进入只读模式，本次不会写入磁盘；'
+      _loadWarning =
+          '数据文件读取失败（$e）。已进入只读模式，本次不会写入磁盘；'
           '请关掉可能占用该文件的程序后重启应用';
       _revision++;
       return;
     }
-    if (json != null) {
-      final bills = json['bills'];
-      if (bills is List) {
+    try {
+      if (json != null) {
+        final bills = json['bills'];
+        if (bills is! List) {
+          throw const FormatException('缺少有效的 bills 数组');
+        }
         for (final item in bills) {
-          if (item is Map) {
-            final bill = Bill.fromJson(Map<String, Object?>.from(item));
-            if (bill.id.isNotEmpty) _bills[bill.id] = bill;
+          if (item is! Map) {
+            throw const FormatException('账单记录不是对象');
+          }
+          final bill = Bill.fromJson(Map<String, Object?>.from(item));
+          if (bill.id.isEmpty) {
+            throw const FormatException('账单记录缺少 id');
+          }
+          _bills[bill.id] = bill;
+        }
+        final folders = json['folders'];
+        if (folders != null && folders is! List) {
+          throw const FormatException('folders 不是数组');
+        }
+        if (folders is List) {
+          for (final item in folders) {
+            if (item is! Map) {
+              throw const FormatException('图片目录记录不是对象');
+            }
+            _folders.add(
+              SourceFolder.fromJson(Map<String, Object?>.from(item)),
+            );
           }
         }
-      }
-      final folders = json['folders'];
-      if (folders is List) {
-        for (final item in folders) {
-          if (item is Map) {
-            _folders.add(SourceFolder.fromJson(Map<String, Object?>.from(item)));
-          }
+        final sync = json['sync'];
+        if (sync != null && sync is! Map) {
+          throw const FormatException('sync 不是对象');
+        }
+        if (sync is Map) {
+          _sync = SyncConfig(
+            url: '${sync['url'] ?? ''}',
+            username: '${sync['user'] ?? ''}',
+            password: '${sync['pass'] ?? ''}',
+            allowInsecureTls: sync['insecure'] == true,
+            autoSync: sync['auto'] != false,
+            lastSyncAt: (sync['at'] as num?)?.toInt() ?? 0,
+            lastSyncMessage: '${sync['msg'] ?? ''}',
+            // 老数据没有这个键：默认按「成功」处理，不要一升级就顶一个失败图标。
+            lastSyncOk: sync['ok'] != false,
+          );
+        }
+        final prefs = json['prefs'];
+        if (prefs != null && prefs is! Map) {
+          throw const FormatException('prefs 不是对象');
+        }
+        if (prefs is Map) {
+          _prefs = UiPrefs.fromJson(Map<String, Object?>.from(prefs));
         }
       }
-      final sync = json['sync'];
-      if (sync is Map) {
-        _sync = SyncConfig(
-          url: '${sync['url'] ?? ''}',
-          username: '${sync['user'] ?? ''}',
-          password: '${sync['pass'] ?? ''}',
-          allowInsecureTls: sync['insecure'] == true,
-          autoSync: sync['auto'] != false,
-          lastSyncAt: (sync['at'] as num?)?.toInt() ?? 0,
-          lastSyncMessage: '${sync['msg'] ?? ''}',
-          // 老数据没有这个键：默认按「成功」处理，不要一升级就顶一个失败图标。
-          lastSyncOk: sync['ok'] != false,
-        );
+    } catch (e) {
+      // JSON 语法正确但结构损坏时也绝不能以部分/空账本继续落盘。
+      _bills.clear();
+      _folders.clear();
+      _sync = const SyncConfig();
+      _prefs = const UiPrefs();
+      _readOnly = true;
+      var backupPath = '${dirs.dataFile.path}.broken-*';
+      try {
+        backupPath =
+            '${dirs.dataFile.path}.broken-${DateTime.now().millisecondsSinceEpoch}';
+        await dirs.dataFile.copy(backupPath);
+      } catch (_) {
+        // 只读保护仍有效；备份失败不能导致原文件被覆盖。
       }
-      final prefs = json['prefs'];
-      if (prefs is Map) {
-        _prefs = UiPrefs.fromJson(Map<String, Object?>.from(prefs));
-      }
+      _loadWarning =
+          '数据文件格式异常（$e），现场已保留到 $backupPath；'
+          '已进入只读模式，本次不会覆盖原文件';
     }
     _loaded = true;
     _revision++;
@@ -322,7 +363,9 @@ class BillStore {
   Future<void> save() {
     // 只读模式：读失败时内存里是空账本，写下去就是「静默清库」。
     if (_readOnly) return Future<void>.value();
-    final next = (_saving ?? Future<void>.value()).then((_) => _writeSnapshot());
+    final next = (_saving ?? Future<void>.value()).then(
+      (_) => _writeSnapshot(),
+    );
     // 链本身吞掉错误：一次失败不能让后续所有 save 都变成 rejected
     _saving = next.catchError((Object _) {});
     return next;
@@ -353,12 +396,14 @@ class BillStore {
 
   bool addFolder(String path, String name) {
     if (_folders.any((f) => f.path == path)) return false;
-    _folders.add(SourceFolder(
-      id: newId(),
-      path: path,
-      name: name,
-      addedAt: DateTime.now().millisecondsSinceEpoch,
-    ));
+    _folders.add(
+      SourceFolder(
+        id: newId(),
+        path: path,
+        name: name,
+        addedAt: DateTime.now().millisecondsSinceEpoch,
+      ),
+    );
     _revision++;
     return true;
   }

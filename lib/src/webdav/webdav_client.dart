@@ -84,23 +84,33 @@ class WebDavClient {
 
   static const String _userAgent = 'WxBills-WebDAV/2.0 (Flutter)';
 
-  static final Uint8List _propfindBody = Uint8List.fromList(utf8.encode(
-    '<?xml version="1.0" encoding="utf-8"?>\n'
-    '<D:propfind xmlns:D="DAV:"><D:prop>'
-    '<D:resourcetype/><D:getcontentlength/><D:getetag/>'
-    '</D:prop></D:propfind>',
-  ));
+  static final Uint8List _propfindBody = Uint8List.fromList(
+    utf8.encode(
+      '<?xml version="1.0" encoding="utf-8"?>\n'
+      '<D:propfind xmlns:D="DAV:"><D:prop>'
+      '<D:resourcetype/><D:getcontentlength/><D:getetag/>'
+      '</D:prop></D:propfind>',
+    ),
+  );
 
   // ---------------------------------------------------------------- 目录
 
   /// PROPFIND Depth:1，列出目录下的条目（含自身）。
   Future<List<DavEntry>> list(String dirUrl) async {
     final base = ensureTrailingSlash(dirUrl);
-    final r = await _send('PROPFIND', base,
-        headers: const {'Depth': '1'}, body: _propfindBody);
+    final r = await _send(
+      'PROPFIND',
+      base,
+      headers: const {'Depth': '1'},
+      body: _propfindBody,
+    );
     final text = await _readText(r.response, limit: _xmlLimit);
     if (!_isSuccess(r.status) && r.status != 207) {
-      throw WebDavException('列目录失败 HTTP ${r.status}${_suffix(text)}', null, r.status);
+      throw WebDavException(
+        '列目录失败 HTTP ${r.status}${_suffix(text)}',
+        null,
+        r.status,
+      );
     }
     return _parseMultiStatus(text, base);
   }
@@ -119,7 +129,11 @@ class WebDavClient {
       final r = await _send('MKCOL', '$current/');
       await _drain(r.response);
       if (!_isSuccess(r.status) && r.status != 405 && r.status != 301) {
-        throw WebDavException('创建目录失败 HTTP ${r.status}（$current）', null, r.status);
+        throw WebDavException(
+          '创建目录失败 HTTP ${r.status}（$current）',
+          null,
+          r.status,
+        );
       }
     }
   }
@@ -141,7 +155,11 @@ class WebDavClient {
     }
     if (!_isSuccess(r.status)) {
       final text = await _readText(r.response, limit: 512);
-      throw WebDavException('下载失败 HTTP ${r.status}${_suffix(text)}', null, r.status);
+      throw WebDavException(
+        '下载失败 HTTP ${r.status}${_suffix(text)}',
+        null,
+        r.status,
+      );
     }
     final bytes = await _readAll(r.response, limit: limit);
     final etag = r.headers.value(HttpHeaders.etagHeader) ?? '';
@@ -166,21 +184,17 @@ class WebDavClient {
     if (strong.isNotEmpty) headers[HttpHeaders.ifMatchHeader] = strong;
     if (createOnly) headers[HttpHeaders.ifNoneMatchHeader] = '*';
     var r = await _send('PUT', url, headers: headers, body: bytes);
-    // 少数服务端（例如坚果云）见到 `If-None-Match: *` 不是回 412，而是直接
-    // 404 ObjectNotFound。这种情况下把它当「不支持条件创建」处理：去掉条件头再发一次。
-    // 安全性没问题——调用方是「刚 GET 过、确认文件不存在」才用 createOnly 的。
-    if (createOnly && (r.status == 404 || r.status == 400 || r.status == 501)) {
-      await _drain(r.response);
-      headers.remove(HttpHeaders.ifNoneMatchHeader);
-      r = await _send('PUT', url, headers: headers, body: bytes);
-    }
     if (r.status == 412) {
       await _drain(r.response);
       throw PreconditionFailedException();
     }
     final text = await _readText(r.response, limit: 512);
     if (!_isSuccess(r.status)) {
-      throw WebDavException('上传失败 HTTP ${r.status}${_suffix(text)}', null, r.status);
+      throw WebDavException(
+        '上传失败 HTTP ${r.status}${_suffix(text)}',
+        null,
+        r.status,
+      );
     }
     return r.headers.value(HttpHeaders.etagHeader) ?? '';
   }
@@ -189,7 +203,11 @@ class WebDavClient {
     final r = await _send('DELETE', url);
     final text = await _readText(r.response, limit: 512);
     if (!_isSuccess(r.status) && r.status != 404) {
-      throw WebDavException('删除失败 HTTP ${r.status}${_suffix(text)}', null, r.status);
+      throw WebDavException(
+        '删除失败 HTTP ${r.status}${_suffix(text)}',
+        null,
+        r.status,
+      );
     }
   }
 
@@ -199,7 +217,13 @@ class WebDavClient {
     final href = hrefRaw.trim();
     if (href.isEmpty) return against;
     try {
-      return Uri.parse(against).resolve(sanitizeUrl(href)).toString();
+      final resolved = Uri.parse(against).resolve(sanitizeUrl(href));
+      if (!_sameOrigin(Uri.parse(root), resolved)) {
+        throw WebDavException('服务器返回了配置地址之外的资源路径');
+      }
+      return resolved.toString();
+    } on WebDavException {
+      rethrow;
     } catch (e) {
       throw WebDavException('无法解析服务器返回的路径: $hrefRaw', e);
     }
@@ -229,6 +253,11 @@ class WebDavClient {
 
   bool _isSuccess(int s) => s >= 200 && s <= 299;
 
+  static bool _sameOrigin(Uri a, Uri b) =>
+      a.scheme.toLowerCase() == b.scheme.toLowerCase() &&
+      a.host.toLowerCase() == b.host.toLowerCase() &&
+      a.port == b.port;
+
   String _suffix(String body) {
     final t = body.trim();
     if (t.isEmpty) return '';
@@ -243,7 +272,10 @@ class WebDavClient {
     }
   }
 
-  Future<Uint8List> _readAll(HttpClientResponse response, {required int limit}) async {
+  Future<Uint8List> _readAll(
+    HttpClientResponse response, {
+    required int limit,
+  }) async {
     final builder = BytesBuilder(copy: false);
     try {
       await for (final chunk in response.timeout(readTimeout)) {
@@ -258,7 +290,10 @@ class WebDavClient {
     return builder.takeBytes();
   }
 
-  Future<String> _readText(HttpClientResponse response, {required int limit}) async {
+  Future<String> _readText(
+    HttpClientResponse response, {
+    required int limit,
+  }) async {
     final builder = BytesBuilder(copy: false);
     try {
       await for (final chunk in response.timeout(readTimeout)) {
@@ -289,10 +324,14 @@ class WebDavClient {
         throw WebDavException('不支持的协议: $scheme');
       }
       if (uri.host.isEmpty) throw WebDavException('URL 缺少主机名: $current');
+      if (!_sameOrigin(Uri.parse(root), uri)) {
+        throw WebDavException('已拒绝访问配置服务器之外的地址：${uri.host}');
+      }
 
       try {
-        final request =
-            await _http.openUrl(method, uri).timeout(connectTimeout);
+        final request = await _http
+            .openUrl(method, uri)
+            .timeout(connectTimeout);
         request.followRedirects = false;
         request.headers.set(HttpHeaders.userAgentHeader, _userAgent);
         request.headers.set(HttpHeaders.acceptHeader, '*/*');
@@ -313,12 +352,19 @@ class WebDavClient {
         final status = response.statusCode;
 
         if (status >= 300 && status <= 399 && status != 304 && redirects < 4) {
-          final location =
-              response.headers.value(HttpHeaders.locationHeader)?.trim();
+          final location = response.headers
+              .value(HttpHeaders.locationHeader)
+              ?.trim();
           if (location != null && location.isNotEmpty) {
             await _drain(response);
+            final next = uri.resolve(sanitizeUrl(location));
+            if (!_sameOrigin(uri, next)) {
+              throw WebDavException(
+                '已拒绝跨源重定向（${uri.host} → ${next.host}），以保护账号凭据和同步数据',
+              );
+            }
             redirects++;
-            current = uri.resolve(sanitizeUrl(location)).toString();
+            current = next.toString();
             continue;
           }
         }
@@ -328,10 +374,15 @@ class WebDavClient {
       } on TimeoutException {
         throw WebDavException('连接 ${uri.host}:${uri.port} 超时$_lanHint');
       } on SocketException catch (e) {
-        throw WebDavException('连接 ${uri.host}:${uri.port} 失败$_lanHint：${e.message}', e);
+        throw WebDavException(
+          '连接 ${uri.host}:${uri.port} 失败$_lanHint：${e.message}',
+          e,
+        );
       } on HandshakeException catch (e) {
         throw WebDavException(
-            'TLS 握手失败：${e.message}（自签证书请在设置里打开「允许不受信任的证书」）', e);
+          'TLS 握手失败：${e.message}（自签证书请在设置里打开「允许不受信任的证书」）',
+          e,
+        );
       } catch (e) {
         throw WebDavException('网络请求失败（$method ${e.runtimeType}: $e）', e);
       }
@@ -355,25 +406,34 @@ class WebDavClient {
       final href = hrefEl?.innerText.trim();
       if (href == null || href.isEmpty) continue;
       final url = resolve(href, requestUrl);
-      final isDir = resp.findAllElements('collection', namespace: '*').isNotEmpty;
-      final sizeEl =
-          _firstOrNull(resp.findAllElements('getcontentlength', namespace: '*'));
+      final isDir = resp
+          .findAllElements('collection', namespace: '*')
+          .isNotEmpty;
+      final sizeEl = _firstOrNull(
+        resp.findAllElements('getcontentlength', namespace: '*'),
+      );
       final size = int.tryParse(sizeEl?.innerText.trim() ?? '') ?? -1;
       final etag =
-          _firstOrNull(resp.findAllElements('getetag', namespace: '*'))?.innerText.trim() ?? '';
+          _firstOrNull(resp.findAllElements('getetag', namespace: '*'))
+              ?.innerText
+              .trim() ??
+          '';
       final clean = url.replaceAll(RegExp(r'/+$'), '');
-      out.add(DavEntry(
-        url: isDir ? '$clean/' : clean,
-        name: fileNameOf(clean),
-        isDirectory: isDir,
-        size: size,
-        etag: etag,
-      ));
+      out.add(
+        DavEntry(
+          url: isDir ? '$clean/' : clean,
+          name: fileNameOf(clean),
+          isDirectory: isDir,
+          size: size,
+          etag: etag,
+        ),
+      );
     }
     return out;
   }
 
-  static T? _firstOrNull<T>(Iterable<T> items) => items.isEmpty ? null : items.first;
+  static T? _firstOrNull<T>(Iterable<T> items) =>
+      items.isEmpty ? null : items.first;
 
   // ---------------------------------------------------------------- 编码
 
@@ -392,7 +452,10 @@ class WebDavClient {
     var i = 0;
     while (i < bytes.length) {
       final b = bytes[i];
-      if (b == 0x25 && i + 2 < bytes.length && _isHexChar(bytes[i + 1]) && _isHexChar(bytes[i + 2])) {
+      if (b == 0x25 &&
+          i + 2 < bytes.length &&
+          _isHexChar(bytes[i + 1]) &&
+          _isHexChar(bytes[i + 2])) {
         sb
           ..writeCharCode(0x25)
           ..writeCharCode(bytes[i + 1])
@@ -400,15 +463,31 @@ class WebDavClient {
         i += 3;
         continue;
       }
-      final ok = (b >= 0x61 && b <= 0x7A) ||
+      final ok =
+          (b >= 0x61 && b <= 0x7A) ||
           (b >= 0x41 && b <= 0x5A) ||
           (b >= 0x30 && b <= 0x39) ||
-          b == 0x2D || b == 0x2E || b == 0x5F || b == 0x7E ||
-          b == 0x3A || b == 0x2F || b == 0x3F ||
-          b == 0x5B || b == 0x5D || b == 0x40 ||
-          b == 0x21 || b == 0x24 || b == 0x26 || b == 0x27 ||
-          b == 0x28 || b == 0x29 || b == 0x2A || b == 0x2B ||
-          b == 0x2C || b == 0x3B || b == 0x3D;
+          b == 0x2D ||
+          b == 0x2E ||
+          b == 0x5F ||
+          b == 0x7E ||
+          b == 0x3A ||
+          b == 0x2F ||
+          b == 0x3F ||
+          b == 0x5B ||
+          b == 0x5D ||
+          b == 0x40 ||
+          b == 0x21 ||
+          b == 0x24 ||
+          b == 0x26 ||
+          b == 0x27 ||
+          b == 0x28 ||
+          b == 0x29 ||
+          b == 0x2A ||
+          b == 0x2B ||
+          b == 0x2C ||
+          b == 0x3B ||
+          b == 0x3D;
       if (ok) {
         sb.writeCharCode(b);
       } else {
@@ -427,10 +506,14 @@ class WebDavClient {
     final bytes = utf8.encode(segment);
     final sb = StringBuffer();
     for (final v in bytes) {
-      final ok = (v >= 0x61 && v <= 0x7A) ||
+      final ok =
+          (v >= 0x61 && v <= 0x7A) ||
           (v >= 0x41 && v <= 0x5A) ||
           (v >= 0x30 && v <= 0x39) ||
-          v == 0x2D || v == 0x2E || v == 0x5F || v == 0x7E;
+          v == 0x2D ||
+          v == 0x2E ||
+          v == 0x5F ||
+          v == 0x7E;
       if (ok) {
         sb.writeCharCode(v);
       } else {
@@ -450,7 +533,10 @@ class WebDavClient {
     var i = 0;
     while (i < bytes.length) {
       final b = bytes[i];
-      if (b == 0x25 && i + 2 < bytes.length && _isHexChar(bytes[i + 1]) && _isHexChar(bytes[i + 2])) {
+      if (b == 0x25 &&
+          i + 2 < bytes.length &&
+          _isHexChar(bytes[i + 1]) &&
+          _isHexChar(bytes[i + 2])) {
         final hi = int.parse(String.fromCharCode(bytes[i + 1]), radix: 16);
         final lo = int.parse(String.fromCharCode(bytes[i + 2]), radix: 16);
         out.addByte((hi << 4) | lo);

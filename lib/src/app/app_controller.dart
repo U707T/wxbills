@@ -224,7 +224,9 @@ class AppController extends ChangeNotifier {
         sorted.sort((a, b) {
           final x = a.amountCents;
           final y = b.amountCents;
-          if (x == null && y == null) return b.fileModified.compareTo(a.fileModified);
+          if (x == null && y == null) {
+            return b.fileModified.compareTo(a.fileModified);
+          }
           if (x == null) return 1;
           if (y == null) return -1;
           final c = x.compareTo(y);
@@ -235,7 +237,9 @@ class AppController extends ChangeNotifier {
         sorted.sort((a, b) {
           final x = a.amountCents;
           final y = b.amountCents;
-          if (x == null && y == null) return b.fileModified.compareTo(a.fileModified);
+          if (x == null && y == null) {
+            return b.fileModified.compareTo(a.fileModified);
+          }
           if (x == null) return 1;
           if (y == null) return -1;
           final c = y.compareTo(x);
@@ -254,8 +258,7 @@ class AppController extends ChangeNotifier {
     _visibleCacheRevision = rev;
     _visibleCacheQuery = _query;
     _visibleCacheSort = _sort;
-    _visibleSumCache =
-        sorted.fold(0, (s, b) => s + (b.amountCents ?? 0));
+    _visibleSumCache = sorted.fold(0, (s, b) => s + (b.amountCents ?? 0));
   }
 
   int get visibleSumCents {
@@ -322,8 +325,10 @@ class AppController extends ChangeNotifier {
       // 跳到了「最接近的」就必须说出来：不说就等于「点了没反应」，
       // 用户还会以为定位到了错的那张。
       if (bestIdx >= 0) {
-        showToast('没有 ¥${Bill.formatCents(target)} 的记录，'
-            '已跳到最接近的 ¥${list[bestIdx].amountYuan}');
+        showToast(
+          '没有 ¥${Bill.formatCents(target)} 的记录，'
+          '已跳到最接近的 ¥${list[bestIdx].amountYuan}',
+        );
       }
     }
     if (hit < 0) {
@@ -412,9 +417,11 @@ class AppController extends ChangeNotifier {
       showToast('复制失败：系统剪贴板暂时不可用（可能被其他程序占用），请稍后重试');
       return;
     }
-    showToast(plan.isFullSize
-        ? '已复制图片，可直接粘贴到聊天窗口'
-        : '已复制缩略图（原图太大或还没同步下来，这张是 256px 的预览图）');
+    showToast(
+      plan.isFullSize
+          ? '已复制图片，可直接粘贴到聊天窗口'
+          : '已复制缩略图（原图太大或还没同步下来，这张是 256px 的预览图）',
+    );
   }
 
   // ---------------------------------------------------------------- 目录
@@ -468,7 +475,9 @@ class AppController extends ChangeNotifier {
         onProgress: (p) {
           if (p.total > 0) {
             _setBusyThrottled(
-                '识别 ${p.done}/${p.total} · ${p.currentName}', p.fraction);
+              '识别 ${p.done}/${p.total} · ${p.currentName}',
+              p.fraction,
+            );
           } else {
             _setBusyThrottled(p.message.isEmpty ? '准备中…' : p.message, 0);
           }
@@ -545,10 +554,12 @@ class AppController extends ChangeNotifier {
           ok++;
           // 走「重建新文件」路线时路径会变，必须回写，否则记录失效
           if (r.newPath.isNotEmpty && r.newPath != cur.path) {
-            store.put(cur.copyWith(
-              path: r.newPath,
-              updatedAt: DateTime.now().millisecondsSinceEpoch,
-            ));
+            store.put(
+              cur.copyWith(
+                path: r.newPath,
+                updatedAt: DateTime.now().millisecondsSinceEpoch,
+              ),
+            );
             // 原生侧是先删旧文件再返回新路径的：这里必须立刻落盘，
             // 否则中途被杀，记录就指向一个已不存在的文件（下次扫描会打墓碑）。
             await store.save();
@@ -566,14 +577,21 @@ class AppController extends ChangeNotifier {
       showToast('刷新中断：$e');
     } finally {
       _refreshing = false;
-      await store.save();
+      var saveWarning = '';
+      try {
+        await store.save();
+      } catch (e) {
+        saveWarning = '，保存失败：$e';
+      }
       _setBusy(false, '', 0);
       _notify();
       final stopped = _cancelRequested && ok + fail + skipped < list.length;
       final detail = failures.isEmpty ? '' : '（${failures.join('；')}）';
-      showToast('已刷新 $ok 张${fail > 0 ? '，$fail 张失败' : ''}'
-          '${skipped > 0 ? '，$skipped 张已删除已跳过' : ''}'
-          '${stopped ? '，已停止' : ''}$detail');
+      showToast(
+        '已刷新 $ok 张${fail > 0 ? '，$fail 张失败' : ''}'
+        '${skipped > 0 ? '，$skipped 张已删除已跳过' : ''}'
+        '${stopped ? '，已停止' : ''}$detail$saveWarning',
+      );
       // 刷新期间被挡住的同步请求，这里补跑（同 scan 的处理）
       _flushQueuedSync();
     }
@@ -622,11 +640,16 @@ class AppController extends ChangeNotifier {
     _syncQueued = false;
     _setBusy(true, '同步中…', 0);
     try {
-      final result = await sync.run(onProgress: (p) {
-        final label = p.message.isEmpty ? p.step : '${p.step} ${p.message}';
-        _setBusyThrottled(label.trim(), p.fraction,
-            interval: const Duration(milliseconds: 200));
-      });
+      final result = await sync.run(
+        onProgress: (p) {
+          final label = p.message.isEmpty ? p.step : '${p.step} ${p.message}';
+          _setBusyThrottled(
+            label.trim(),
+            p.fraction,
+            interval: const Duration(milliseconds: 200),
+          );
+        },
+      );
       _setBusy(false, '', 0);
       _notify();
       // 静默同步一句都不弹：成功时那句「已是最新」每天要弹好几次，
@@ -664,8 +687,12 @@ class AppController extends ChangeNotifier {
   Future<String> diagnoseRecognition() async {
     final buf = StringBuffer();
     buf.writeln('平台：${Platform.operatingSystem}');
-    buf.writeln('目录：${store.folders.isEmpty ? '（未导入）' : store.folders.map((f) => f.isSaf ? 'SAF' : f.path).join(' / ')}');
-    buf.writeln('最近扫描：${_lastScanMessage.isEmpty ? '（还没扫过）' : _lastScanMessage}');
+    buf.writeln(
+      '目录：${store.folders.isEmpty ? '（未导入）' : store.folders.map((f) => f.isSaf ? 'SAF' : f.path).join(' / ')}',
+    );
+    buf.writeln(
+      '最近扫描：${_lastScanMessage.isEmpty ? '（还没扫过）' : _lastScanMessage}',
+    );
     final bill = store.bills.isEmpty ? null : store.bills.first;
     if (bill == null) {
       buf.writeln('没有记录可诊断：先导入文件夹并扫描一次');
@@ -681,7 +708,9 @@ class AppController extends ChangeNotifier {
       } else {
         buf.writeln('读图成功：${ocr.width}x${ocr.height}');
         final r = AmountReader.read(ocr.rgba, ocr.width, ocr.height);
-        buf.writeln('识别结果：${r.text ?? '（空）'}　置信度 ${(r.confidence * 100).toStringAsFixed(1)}%');
+        buf.writeln(
+          '识别结果：${r.text ?? '（空）'}　置信度 ${(r.confidence * 100).toStringAsFixed(1)}%',
+        );
       }
       final thumb = await source.makeThumbBytes(bill.path);
       buf.writeln('缩略图：${thumb == null ? '失败' : '${thumb.length} 字节'}');
@@ -801,9 +830,9 @@ class AppController extends ChangeNotifier {
   /// 把窗口贴到屏幕顶部（Windows）。成功后鼠标离开就自动收起。
   Future<void> snapWindowToTop() async {
     final ok = await WindowShell.snapToTop();
-    showToast(ok
-        ? '已贴到屏幕顶部：鼠标离开会自动收起，碰到屏幕顶边弹回来'
-        : '贴到顶部了，但不会自动收起：窗口比屏幕还高，先把它调矮一点再来一次');
+    showToast(
+      ok ? '已贴到屏幕顶部：鼠标离开会自动收起，碰到屏幕顶边弹回来' : '贴到顶部了，但不会自动收起：窗口比屏幕还高，先把它调矮一点再来一次',
+    );
   }
 
   void _setBusy(bool busy, String label, double fraction) {
